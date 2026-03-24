@@ -6,16 +6,16 @@
 # with optional padding (letterboxing) or cropping to fit.
 #
 # Behaviour:
-# - WAN:
+# - VIDEO:
 #     Uses 480p / 720p / 1080p presets and simple aspect logic
-# - QWEN:
+# - IMAGE:
 #     Ignores resolution preset and instead:
 #       * Preserves original aspect ratio
-#       * Targets a given megapixel count (QWEN_megapixels)
-#       * Ensures both width and height are divisible by 16
+#       * Targets a given megapixel count (Megapixels)
+#       * Ensures both width and height are divisible by a given number (Multiple)
 #
 # Author: slivik
-# Version: 1.6.1 (QWEN MP input, cleaned & de-noised)
+# Version: 1.0.0 (Initial release)
 #
 
 import torch
@@ -29,21 +29,21 @@ class SmartResizer:
     A node that resizes an image to a target resolution.
 
     model_type:
-      - "WAN":
+      - "VIDEO":
           Uses a resolution preset ("480p", "720p", "1080p").
           Chooses a square-ish or wide-ish target based on input AR.
-      - "QWEN":
-          Uses QWEN_megapixels (float in MP) instead of the preset.
+      - "IMAGE":
+          Uses Megapixels (float in MP) instead of the preset.
           The target size:
-            * is as close as possible to MP * 1,000,000 pixels,
+            * is as close as possible to Megapixels * 1,000,000 pixels,
             * preserves the original aspect ratio,
-            * has width and height divisible by 16.
+            * has width and height divisible by a given number (Multiple).
 
     The node can either pad (letterbox) or crop to fit the target size.
     """
 
     RESOLUTIONS = ["480p", "720p", "1080p"]
-    MODEL_TYPES = ["WAN", "QWEN"]
+    MODEL_TYPES = ["VIDEO", "IMAGE"]
 
     # High-quality resampling filter.
     RESAMPLING_METHOD = Image.Resampling.LANCZOS
@@ -53,10 +53,10 @@ class SmartResizer:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "model_type": (cls.MODEL_TYPES, {"default": "WAN"}),
+                "model_type": (cls.MODEL_TYPES, {"default": "VIDEO"}),
 
-                # QWEN-only: target megapixels (MP)
-                "QWEN_megapixels": (
+                # IMAGE-only: target megapixels (MP)
+                "Megapixels": (
                     "FLOAT",
                     {
                         "default": 1.00,
@@ -64,10 +64,10 @@ class SmartResizer:
                         "max": 5.00,
                         "step": 0.01,
                         "display": "number",
-                        "label": "QWEN only — Target Megapixels (MP)",
+                        "label": "IMAGE only — Target Megapixels (MP)",
                     },
                 ),
-                "QWEN_multiple": (
+                "Multiple": (
                     "INT",
                     {
                         "default": 16,
@@ -75,10 +75,10 @@ class SmartResizer:
                         "max": 112,
                         "step": 1,
                         "display": "number",
-                        "label": "QWEN only — Divisible by",
+                        "label": "IMAGE only — Divisible by",
                     }
                 ),
-                "WAN_preset": (cls.RESOLUTIONS,),
+                "VIDEO_preset": (cls.RESOLUTIONS,),
                 "pad_image": (
                     "BOOLEAN",
                     {
@@ -95,7 +95,7 @@ class SmartResizer:
     FUNCTION = "process"
     CATEGORY = "slikvik/Image"
 
-    def _select_qwen_target(
+    def _select_megapixels_target(
         self,
         original_width: int,
         original_height: int,
@@ -103,7 +103,7 @@ class SmartResizer:
         multiple: int = 16,
     ):
         """
-        Compute target (width, height) for QWEN mode:
+        Compute target (width, height) for IMAGE mode:
 
         - Preserve original aspect ratio as much as possible.
         - Approximate the desired total number of pixels (target_pixels).
@@ -161,9 +161,9 @@ class SmartResizer:
         self,
         image: torch.Tensor,
         model_type: str,
-        QWEN_megapixels: float,
-        QWEN_multiple: int,
-        WAN_preset: str,
+        Megapixels: float,
+        Multiple: int,
+        VIDEO_preset: str,
         pad_image: bool,
     ):
         # Expecting shape: (batch, H, W, C)
@@ -189,21 +189,21 @@ class SmartResizer:
         # --- 2. Decide target dimensions ---
         target_width, target_height = 0, 0
 
-        if model_type == "QWEN":
+        if model_type == "IMAGE":
             # Safety clamp for MP field.
-            if QWEN_megapixels <= 0:
-                QWEN_megapixels = 1.0
+            if Megapixels <= 0:
+                Megapixels = 1.0
 
-            target_pixels = int(QWEN_megapixels * 1_000_000)
-            target_width, target_height = self._select_qwen_target(
+            target_pixels = int(Megapixels * 1_000_000)
+            target_width, target_height = self._select_megapixels_target(
                 original_width,
                 original_height,
                 target_pixels=target_pixels,
-                multiple = QWEN_multiple,
+                multiple = Multiple,
             )
         else:
-            # WAN mode: legacy resolution preset behaviour.
-            if WAN_preset == "480p":
+            # VIDEO mode: legacy resolution preset behaviour.
+            if VIDEO_preset == "480p":
                 if is_square_ish:
                     target_width, target_height = 512, 512
                 else:
@@ -212,7 +212,7 @@ class SmartResizer:
                     else:  # Landscape
                         target_width, target_height = 848, 480
 
-            elif WAN_preset == "720p":
+            elif VIDEO_preset == "720p":
                 if is_square_ish:
                     target_width, target_height = 768, 768
                 else:
@@ -221,7 +221,7 @@ class SmartResizer:
                     else:  # Landscape
                         target_width, target_height = 1280, 720
 
-            elif WAN_preset == "1080p":
+            elif VIDEO_preset == "1080p":
                 if is_square_ish:
                     target_width, target_height = 1152, 1152
                 else:
