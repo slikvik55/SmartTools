@@ -44,9 +44,15 @@ class SmartResizer:
 
     RESOLUTIONS = ["480p", "720p", "1080p"]
     MODEL_TYPES = ["VIDEO", "IMAGE"]
+    RESAMPLING_METHODS = ["Lanczos", "Bilinear", "Nearest-Exact"]
 
-    # High-quality resampling filter.
-    RESAMPLING_METHOD = Image.Resampling.LANCZOS
+    @staticmethod
+    def _pil_resample(resampling: str):
+        return {
+            "Lanczos": Image.Resampling.LANCZOS,
+            "Bilinear": Image.Resampling.BILINEAR,
+            "Nearest-Exact": Image.Resampling.NEAREST,
+        }.get(resampling, Image.Resampling.LANCZOS)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -54,6 +60,10 @@ class SmartResizer:
             "required": {
                 "image": ("IMAGE",),
                 "model_type": (cls.MODEL_TYPES, {"default": "VIDEO"}),
+                "resampling": (
+                    cls.RESAMPLING_METHODS,
+                    {"default": "Lanczos"},
+                ),
 
                 # IMAGE-only: target megapixels (MP)
                 "Megapixels": (
@@ -161,11 +171,13 @@ class SmartResizer:
         self,
         image: torch.Tensor,
         model_type: str,
+        resampling: str,
         Megapixels: float,
         Multiple: int,
         VIDEO_preset: str,
         pad_image: bool,
     ):
+        pil_resample = self._pil_resample(resampling)
         # Expecting shape: (batch, H, W, C)
         _, original_height, original_width, _ = image.shape
 
@@ -255,7 +267,7 @@ class SmartResizer:
                     scaled_width = int(target_height * original_ar)
 
                 resized_img = pil_img.resize(
-                    (scaled_width, scaled_height), self.RESAMPLING_METHOD
+                    (scaled_width, scaled_height), pil_resample
                 )
 
                 # Create letterbox background
@@ -283,7 +295,7 @@ class SmartResizer:
                         new_height = int(img_height * (target_width / img_width))
 
                     resized_img = pil_img.resize(
-                        (new_width, new_height), self.RESAMPLING_METHOD
+                        (new_width, new_height), pil_resample
                     )
 
                     left = (new_width - target_width) / 2
