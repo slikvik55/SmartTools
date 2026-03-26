@@ -19,6 +19,7 @@
 #
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
@@ -151,7 +152,18 @@ class SmartResizer:
                         "label": "IMAGE only — Outpaint feathering",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "mask": (
+                    "MASK",
+                    {
+                        "tooltip": (
+                            "IMAGE + outpaint: optional mask for the resized frame (before pad). "
+                            "Inner mask is max(your mask, edge feathering). New border stays 1."
+                        ),
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "INT", "INT", "MASK")
@@ -222,16 +234,61 @@ class SmartResizer:
         return best_w, best_h
 
     @staticmethod
+    def _inner_feather_mask(d2: int, d3: int, left: int, top: int, right: int, bottom: int, feathering: int):
+        t = torch.zeros((d2, d3), dtype=torch.float32)
+        if feathering > 0 and feathering * 2 < d2 and feathering * 2 < d3:
+            for i in range(d2):
+                for j in range(d3):
+                    dt = i if top != 0 else d2
+                    db = d2 - i if bottom != 0 else d2
+                    dl = j if left != 0 else d3
+                    dr = d3 - j if right != 0 else d3
+                    d_edge = min(dt, db, dl, dr)
+                    if d_edge >= feathering:
+                        continue
+                    v = (feathering - d_edge) / feathering
+                    t[i, j] = v * v
+        return t
+
+    @staticmethod
+    def _prepare_source_mask(
+        source_mask: torch.Tensor,
+        batch: int,
+        height: int,
+        width: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """(B, height, width) float on device, clamped to [0, 1]."""
+        sm = source_mask.float()
+        if sm.dim() == 2:
+            sm = sm.unsqueeze(0)
+        if sm.shape[0] == 1 and batch > 1:
+            sm = sm.expand(batch, -1, -1)
+        elif sm.shape[0] != batch:
+            sm = sm[0:1].expand(batch, -1, -1)
+        if sm.shape[1] != height or sm.shape[2] != width:
+            sm = F.interpolate(
+                sm.unsqueeze(1),
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+        return sm.clamp(0.0, 1.0).to(device)
+
+    @classmethod
     def _outpaint_expand(
+        cls,
         image: torch.Tensor,
         left: int,
         top: int,
         right: int,
         bottom: int,
         feathering: int,
+        source_mask: torch.Tensor | None = None,
     ):
         """
-        Canvas expansion + feathered mask (same behaviour as ImagePadForOutpaint).
+        Canvas expansion + mask: outer pad is 1; inner is feathered edges combined with
+        optional source_mask via max(source, feather) when a mask is wired.
         image: (B, H, W, C) float, any device.
         """
         image = image.to(dtype=torch.float32)
@@ -248,25 +305,17 @@ class SmartResizer:
         )
         new_image[:, top : top + d2, left : left + d3, :] = image
 
-        t = torch.zeros((d2, d3), dtype=torch.float32)
-        if feathering > 0 and feathering * 2 < d2 and feathering * 2 < d3:
-            for i in range(d2):
-                for j in range(d3):
-                    dt = i if top != 0 else d2
-                    db = d2 - i if bottom != 0 else d2
-                    dl = j if left != 0 else d3
-                    dr = d3 - j if right != 0 else d3
-                    d_edge = min(dt, db, dl, dr)
-                    if d_edge >= feathering:
-                        continue
-                    v = (feathering - d_edge) / feathering
-                    t[i, j] = v * v
+        h_out, w_out = d2 + top + bottom, d3 + left + right
+        t = cls._inner_feather_mask(d2, d3, left, top, right, bottom, feathering)
+        t_b = t.to(device).unsqueeze(0).expand(d1, -1, -1)
+        if source_mask is not None:
+            sm = cls._prepare_source_mask(source_mask, d1, d2, d3, device)
+            inner = torch.maximum(sm, t_b)
+        else:
+            inner = t_b
 
-        mask_hw = torch.ones(
-            (d2 + top + bottom, d3 + left + right), dtype=torch.float32
-        )
-        mask_hw[top : top + d2, left : left + d3] = t
-        mask = mask_hw.unsqueeze(0).expand(d1, -1, -1).to(device)
+        mask = torch.ones((d1, h_out, w_out), dtype=torch.float32, device=device)
+        mask[:, top : top + d2, left : left + d3] = inner
 
         return new_image, mask
 
@@ -284,6 +333,7 @@ class SmartResizer:
         pad_right: int,
         pad_bottom: int,
         feathering: int,
+        mask: torch.Tensor | None = None,
     ):
         pil_resample = self._pil_resample(resampling)
         # Expecting shape: (batch, H, W, C)
@@ -432,6 +482,7 @@ class SmartResizer:
                 pad_right,
                 pad_bottom,
                 feathering,
+                source_mask=mask,
             )
             target_width = target_width + pad_left + pad_right
             target_height = target_height + pad_top + pad_bottom
