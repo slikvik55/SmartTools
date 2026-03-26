@@ -152,6 +152,19 @@ class SmartResizer:
                         "label": "IMAGE only — Outpaint feathering",
                     },
                 ),
+                "overlay_mask": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "label": "Overlay Mask",
+                        "label_on": "On",
+                        "label_off": "Off",
+                        "tooltip": (
+                            "Full-opacity white where the output mask is bright (inpaint / padded "
+                            "regions); unchanged where mask is 0."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "mask": (
@@ -319,6 +332,35 @@ class SmartResizer:
 
         return new_image, mask
 
+    @staticmethod
+    def _blend_mask_as_white_overlay(
+        image: torch.Tensor,
+        mask: torch.Tensor,
+        strength: float = 1.0,
+    ) -> torch.Tensor:
+        """Blend RGB toward white where mask is high; image (B,H,W,C), mask (B,H,W)."""
+        image = image.to(dtype=torch.float32)
+        m = mask.to(dtype=torch.float32).clamp(0.0, 1.0)
+        if m.dim() == 2:
+            m = m.unsqueeze(0)
+        b, h, w, c = image.shape
+        if m.shape[0] == 1 and b > 1:
+            m = m.expand(b, -1, -1)
+        elif m.shape[0] != b:
+            m = m[0:1].expand(b, -1, -1)
+        if m.shape[1] != h or m.shape[2] != w:
+            m = F.interpolate(
+                m.unsqueeze(1),
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(1)
+        m = m.to(device=image.device)
+        m4 = m.unsqueeze(-1).expand(b, h, w, c)
+        white = torch.ones_like(image)
+        out = image * (1.0 - strength * m4) + white * (strength * m4)
+        return out.clamp(0.0, 1.0)
+
     def process(
         self,
         image: torch.Tensor,
@@ -333,6 +375,7 @@ class SmartResizer:
         pad_right: int,
         pad_bottom: int,
         feathering: int,
+        overlay_mask: bool,
         mask: torch.Tensor | None = None,
     ):
         pil_resample = self._pil_resample(resampling)
@@ -490,6 +533,11 @@ class SmartResizer:
             _, th, tw, _ = final_batch.shape
             outpaint_mask = torch.zeros(
                 (b, th, tw), dtype=torch.float32, device=final_batch.device
+            )
+
+        if overlay_mask:
+            final_batch = self._blend_mask_as_white_overlay(
+                final_batch, outpaint_mask
             )
 
         return final_batch, target_width, target_height, outpaint_mask
