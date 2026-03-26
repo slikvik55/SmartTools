@@ -23,6 +23,9 @@ import numpy as np
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
+# Align with common ComfyUI image nodes for pad limits.
+MAX_RESOLUTION = 16384
+
 
 class SmartResizer:
     """
@@ -97,11 +100,62 @@ class SmartResizer:
                         "label_off": "Crop to Fit",
                     },
                 ),
+                "pad_left": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "label": "IMAGE only — Outpaint pad left",
+                    },
+                ),
+                "pad_top": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "label": "IMAGE only — Outpaint pad top",
+                    },
+                ),
+                "pad_right": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "label": "IMAGE only — Outpaint pad right",
+                    },
+                ),
+                "pad_bottom": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": MAX_RESOLUTION,
+                        "step": 8,
+                        "label": "IMAGE only — Outpaint pad bottom",
+                    },
+                ),
+                "feathering": (
+                    "INT",
+                    {
+                        "default": 40,
+                        "min": 0,
+                        "max": MAX_RESOLUTION,
+                        "step": 1,
+                        "advanced": True,
+                        "label": "IMAGE only — Outpaint feathering",
+                    },
+                ),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "INT", "INT")
-    RETURN_NAMES = ("image", "width", "height")
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "MASK")
+    RETURN_NAMES = ("image", "width", "height", "mask")
     FUNCTION = "process"
     CATEGORY = "slikvik/Image"
 
@@ -167,6 +221,55 @@ class SmartResizer:
         _, _, best_w, best_h = candidates[0]
         return best_w, best_h
 
+    @staticmethod
+    def _outpaint_expand(
+        image: torch.Tensor,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+        feathering: int,
+    ):
+        """
+        Canvas expansion + feathered mask (same behaviour as ImagePadForOutpaint).
+        image: (B, H, W, C) float, any device.
+        """
+        image = image.to(dtype=torch.float32)
+        d1, d2, d3, d4 = image.shape
+        device = image.device
+
+        new_image = (
+            torch.ones(
+                (d1, d2 + top + bottom, d3 + left + right, d4),
+                dtype=torch.float32,
+                device=device,
+            )
+            * 0.5
+        )
+        new_image[:, top : top + d2, left : left + d3, :] = image
+
+        t = torch.zeros((d2, d3), dtype=torch.float32)
+        if feathering > 0 and feathering * 2 < d2 and feathering * 2 < d3:
+            for i in range(d2):
+                for j in range(d3):
+                    dt = i if top != 0 else d2
+                    db = d2 - i if bottom != 0 else d2
+                    dl = j if left != 0 else d3
+                    dr = d3 - j if right != 0 else d3
+                    d_edge = min(dt, db, dl, dr)
+                    if d_edge >= feathering:
+                        continue
+                    v = (feathering - d_edge) / feathering
+                    t[i, j] = v * v
+
+        mask_hw = torch.ones(
+            (d2 + top + bottom, d3 + left + right), dtype=torch.float32
+        )
+        mask_hw[top : top + d2, left : left + d3] = t
+        mask = mask_hw.unsqueeze(0).expand(d1, -1, -1).to(device)
+
+        return new_image, mask
+
     def process(
         self,
         image: torch.Tensor,
@@ -176,14 +279,23 @@ class SmartResizer:
         Multiple: int,
         VIDEO_preset: str,
         pad_image: bool,
+        pad_left: int,
+        pad_top: int,
+        pad_right: int,
+        pad_bottom: int,
+        feathering: int,
     ):
         pil_resample = self._pil_resample(resampling)
         # Expecting shape: (batch, H, W, C)
-        _, original_height, original_width, _ = image.shape
+        b, original_height, original_width, _ = image.shape
 
         if original_height <= 0 or original_width <= 0:
-            # Degenerate input: just return as-is.
-            return image, original_width, original_height
+            empty_mask = torch.zeros(
+                (b, original_height, original_width),
+                dtype=torch.float32,
+                device=image.device,
+            )
+            return image, original_width, original_height, empty_mask
 
         # --- 1. Determine aspect ratio characteristics (for WAN presets) ---
         aspect_ratio = original_width / original_height
@@ -312,7 +424,24 @@ class SmartResizer:
 
         final_batch = torch.stack(processed_images)
 
-        return final_batch, target_width, target_height
+        if model_type == "IMAGE":
+            final_batch, outpaint_mask = self._outpaint_expand(
+                final_batch,
+                pad_left,
+                pad_top,
+                pad_right,
+                pad_bottom,
+                feathering,
+            )
+            target_width = target_width + pad_left + pad_right
+            target_height = target_height + pad_top + pad_bottom
+        else:
+            _, th, tw, _ = final_batch.shape
+            outpaint_mask = torch.zeros(
+                (b, th, tw), dtype=torch.float32, device=final_batch.device
+            )
+
+        return final_batch, target_width, target_height, outpaint_mask
 
 
 # --- ComfyUI Registration ---
