@@ -8,7 +8,7 @@ Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI). Category:
    `ComfyUI/custom_nodes/SmartTools`
 2. Restart ComfyUI.
 
-Dependencies match a typical ComfyUI install: **PyTorch**, **NumPy**, **Pillow**. **Smart Image** also uses ComfyUI’s `folder_paths` and `comfy.cli_args`.
+Dependencies match a typical ComfyUI install: **PyTorch**, **NumPy**, **Pillow**. **Smart Save** also uses ComfyUI’s `folder_paths`, `comfy.cli_args`, and the Comfy server for the save route.
 
 ## Nodes
 
@@ -37,18 +37,18 @@ Resizes a batch of images to a target resolution with optional **letterboxing** 
 
 ---
 
-### Smart Image (Smart Save)
+### Smart Save
 
-**Display name:** Smart Image (Smart Save)  
+**Display name:** Smart Save  
 **Category:** `slikvik`
 
-Save / preview node with optional disk write:
+Same PNG output and metadata behaviour as ComfyUI’s built-in **Save Image** (`folder_paths.get_save_image_path`, `%batch_num%`, optional workflow metadata in PNG), but files are written to the **output** folder only when you click **Save Image** on the node.
 
-- **save:** `disable` — preview only; `enable` — write to the output folder.
-- **filename_prefix:** Same style as built-in save nodes (dates, tokens, etc.).
-- **images:** Optional; when omitted, the node can use its cache or reload from last real saves.
+1. **Queue the workflow** at least once so the node can cache the current image batch (keyed by the graph node id).
+2. The node shows **temp** previews under `temp/SmartSavePreview/` so thumbnails update without writing to the final output path.
+3. Click **Save Image** to write PNGs to the output directory.
 
-Useful when you want previews to update without saving every run.
+Requires the included **web** extension (`web/smart_save.js`); restart ComfyUI after installing or updating this pack.
 
 ## Author
 
