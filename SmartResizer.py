@@ -6,13 +6,11 @@
 # with optional padding (letterboxing) or cropping to fit.
 #
 # Behaviour:
-# - VIDEO:
-#     Uses 480p / 720p / 1080p presets and simple aspect logic
-# - IMAGE:
-#     Ignores resolution preset and instead:
-#       * Preserves original aspect ratio
-#       * Targets a given megapixel count (Megapixels)
-#       * Ensures both width and height are divisible by a given number (Multiple)
+# - Use Presets ON:
+#     Uses 480p / 720p / 1080p / 1024px presets and simple aspect logic.
+# - Use Presets OFF:
+#     Uses Megapixels + Multiple (aspect-preserving target size).
+# Padding, letterbox/crop, outpaint pads, feathering, and overlay mask apply in both modes.
 #
 # Author: slivik
 # Version: 1.0.0 (Initial release)
@@ -32,22 +30,15 @@ class SmartResizer:
     """
     A node that resizes an image to a target resolution.
 
-    model_type:
-      - "VIDEO":
-          Uses a resolution preset ("480p", "720p", "1080p").
-          Chooses a square-ish or wide-ish target based on input AR.
-      - "IMAGE":
-          Uses Megapixels (float in MP) instead of the preset.
-          The target size:
-            * is as close as possible to Megapixels * 1,000,000 pixels,
-            * preserves the original aspect ratio,
-            * has width and height divisible by a given number (Multiple).
+    use_presets:
+      - True: target size from VIDEO_preset (square-ish vs wide-ish AR).
+      - False: target size from Megapixels and Multiple.
 
-    The node can either pad (letterbox) or crop to fit the target size.
+    Letterbox/crop (`pad_image`), then outpaint pads, feathering, optional mask,
+    and optional overlay apply regardless of preset vs megapixel sizing.
     """
 
-    RESOLUTIONS = ["480p", "720p", "1080p"]
-    MODEL_TYPES = ["VIDEO", "IMAGE"]
+    RESOLUTIONS = ["480p", "720p", "1080p", "1024px"]
     RESAMPLING_METHODS = ["Lanczos", "Bilinear", "Nearest-Exact"]
 
     @staticmethod
@@ -63,13 +54,23 @@ class SmartResizer:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "model_type": (cls.MODEL_TYPES, {"default": "VIDEO"}),
+                "use_presets": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "label_on": "Use Presets ON",
+                        "label_off": "Use Presets OFF",
+                        "tooltip": (
+                            "ON: target size from resolution preset (480p–1080p, 1024px). "
+                            "OFF: target size from Megapixels and Multiple."
+                        ),
+                    },
+                ),
                 "resampling": (
                     cls.RESAMPLING_METHODS,
                     {"default": "Lanczos"},
                 ),
 
-                # IMAGE-only: target megapixels (MP)
                 "Megapixels": (
                     "FLOAT",
                     {
@@ -78,7 +79,7 @@ class SmartResizer:
                         "max": 5.00,
                         "step": 0.01,
                         "display": "number",
-                        "label": "IMAGE only — Target Megapixels (MP)",
+                        "label": "Target Megapixels (MP)",
                     },
                 ),
                 "Multiple": (
@@ -89,7 +90,7 @@ class SmartResizer:
                         "max": 112,
                         "step": 1,
                         "display": "number",
-                        "label": "IMAGE only — Divisible by",
+                        "label": "Divisible by",
                     }
                 ),
                 "VIDEO_preset": (cls.RESOLUTIONS,),
@@ -108,7 +109,7 @@ class SmartResizer:
                         "min": 0,
                         "max": MAX_RESOLUTION,
                         "step": 8,
-                        "label": "IMAGE only — Outpaint pad left",
+                        "label": "Outpaint pad left",
                     },
                 ),
                 "pad_top": (
@@ -118,7 +119,7 @@ class SmartResizer:
                         "min": 0,
                         "max": MAX_RESOLUTION,
                         "step": 8,
-                        "label": "IMAGE only — Outpaint pad top",
+                        "label": "Outpaint pad top",
                     },
                 ),
                 "pad_right": (
@@ -128,7 +129,7 @@ class SmartResizer:
                         "min": 0,
                         "max": MAX_RESOLUTION,
                         "step": 8,
-                        "label": "IMAGE only — Outpaint pad right",
+                        "label": "Outpaint pad right",
                     },
                 ),
                 "pad_bottom": (
@@ -138,7 +139,7 @@ class SmartResizer:
                         "min": 0,
                         "max": MAX_RESOLUTION,
                         "step": 8,
-                        "label": "IMAGE only — Outpaint pad bottom",
+                        "label": "Outpaint pad bottom",
                     },
                 ),
                 "feathering": (
@@ -149,7 +150,7 @@ class SmartResizer:
                         "max": MAX_RESOLUTION,
                         "step": 1,
                         "advanced": True,
-                        "label": "IMAGE only — Outpaint feathering",
+                        "label": "Outpaint feathering",
                     },
                 ),
                 "overlay_mask": (
@@ -171,7 +172,7 @@ class SmartResizer:
                     "MASK",
                     {
                         "tooltip": (
-                            "IMAGE + outpaint: optional mask for the resized frame (before pad). "
+                            "Optional mask for the resized frame (before outpaint pads). "
                             "Inner mask is max(your mask, edge feathering). New border stays 1."
                         ),
                     },
@@ -192,7 +193,7 @@ class SmartResizer:
         multiple: int = 16,
     ):
         """
-        Compute target (width, height) for IMAGE mode:
+        Compute target (width, height) when Use Presets is off:
 
         - Preserve original aspect ratio as much as possible.
         - Approximate the desired total number of pixels (target_pixels).
@@ -364,7 +365,7 @@ class SmartResizer:
     def process(
         self,
         image: torch.Tensor,
-        model_type: str,
+        use_presets: bool,
         resampling: str,
         Megapixels: float,
         Multiple: int,
@@ -406,8 +407,8 @@ class SmartResizer:
         # --- 2. Decide target dimensions ---
         target_width, target_height = 0, 0
 
-        if model_type == "IMAGE":
-            # Safety clamp for MP field.
+        if not use_presets:
+            # Megapixel target (aspect ratio + Multiple divisibility).
             if Megapixels <= 0:
                 Megapixels = 1.0
 
@@ -419,7 +420,7 @@ class SmartResizer:
                 multiple = Multiple,
             )
         else:
-            # VIDEO mode: legacy resolution preset behaviour.
+            # Resolution preset behaviour.
             if VIDEO_preset == "480p":
                 if is_square_ish:
                     target_width, target_height = 512, 512
@@ -446,6 +447,14 @@ class SmartResizer:
                         target_width, target_height = 1080, 1920
                     else:  # Landscape
                         target_width, target_height = 1920, 1080
+            elif VIDEO_preset == "1024px":
+                if is_square_ish:
+                    target_width, target_height = 1024, 1024
+                else:
+                    if original_width < original_height:  # Portrait
+                        target_width, target_height = 832, 1216
+                    else:  # Landscape
+                        target_width, target_height = 1216, 832
 
         # --- 3. Process the batch of images ---
         processed_images = []
@@ -517,23 +526,17 @@ class SmartResizer:
 
         final_batch = torch.stack(processed_images)
 
-        if model_type == "IMAGE":
-            final_batch, outpaint_mask = self._outpaint_expand(
-                final_batch,
-                pad_left,
-                pad_top,
-                pad_right,
-                pad_bottom,
-                feathering,
-                source_mask=mask,
-            )
-            target_width = target_width + pad_left + pad_right
-            target_height = target_height + pad_top + pad_bottom
-        else:
-            _, th, tw, _ = final_batch.shape
-            outpaint_mask = torch.zeros(
-                (b, th, tw), dtype=torch.float32, device=final_batch.device
-            )
+        final_batch, outpaint_mask = self._outpaint_expand(
+            final_batch,
+            pad_left,
+            pad_top,
+            pad_right,
+            pad_bottom,
+            feathering,
+            source_mask=mask,
+        )
+        target_width = target_width + pad_left + pad_right
+        target_height = target_height + pad_top + pad_bottom
 
         if overlay_mask:
             final_batch = self._blend_mask_as_white_overlay(

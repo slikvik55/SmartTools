@@ -22,18 +22,19 @@ Resizes a batch of images to a target resolution with optional **letterboxing** 
 | Input | Notes |
 |--------|--------|
 | `image` | Image batch `(B, H, W, C)` |
-| `model_type` | **VIDEO** — uses resolution preset; **IMAGE** — uses megapixel target |
+| `use_presets` | **ON** — target size from `VIDEO_preset`; **OFF** — from `Megapixels` + `Multiple` |
 | `resampling` | **Lanczos**, **Bilinear**, or **Nearest-Exact** (Pillow nearest-neighbor) |
-| `Megapixels` | IMAGE mode: target size in MP (0.10–5.00) |
-| `Multiple` | IMAGE mode: both sides snapped to be divisible by this (e.g. 16) |
-| `VIDEO_preset` | **480p**, **720p**, or **1080p** |
+| `Megapixels` | When presets off: target size in MP (0.10–5.00) |
+| `Multiple` | When presets off: both sides snapped to be divisible by this (e.g. 16) |
+| `VIDEO_preset` | **480p**, **720p**, **1080p**, or **1024px** (when presets on) |
 | `pad_image` | On: pad (letterbox); off: crop to target aspect |
+| Outpaint | `pad_left` / `pad_top` / `pad_right` / `pad_bottom`, `feathering`, optional `mask`, `overlay_mask` — applied after resize in **both** preset and megapixel modes |
 
-**VIDEO mode:** Picks a **square-ish** vs **wide** (16:9 / 9:16 style) target from the input aspect ratio, then applies the chosen preset dimensions.
+**Use Presets ON:** Chooses **square-ish** vs **wide** (16:9 / 9:16 style) from input aspect ratio, then applies the selected preset dimensions.
 
-**IMAGE mode:** Ignores `VIDEO_preset`. Chooses width/height that preserve aspect ratio, approximate total pixels `Megapixels × 1_000_000`, and satisfy `Multiple`.
+**Use Presets OFF:** Ignores `VIDEO_preset`. Chooses width/height that preserve aspect ratio, approximate total pixels `Megapixels × 1_000_000`, and satisfy `Multiple`.
 
-**Outputs:** `image`, `width`, `height` (target dimensions).
+**Outputs:** `image`, `width`, `height`, `mask` (includes outpaint / feathering when used).
 
 ---
 
