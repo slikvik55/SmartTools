@@ -71,7 +71,7 @@ class SmartResizer:
                     {"default": "Lanczos"},
                 ),
 
-                "Megapixels": (
+                "megapixels_target": (
                     "FLOAT",
                     {
                         "default": 1.00,
@@ -82,7 +82,7 @@ class SmartResizer:
                         "label": "Target Megapixels (MP)",
                     },
                 ),
-                "Multiple": (
+                "multiple_target": (
                     "INT",
                     {
                         "default": 16,
@@ -93,7 +93,7 @@ class SmartResizer:
                         "label": "Divisible by",
                     }
                 ),
-                "VIDEO_preset": (cls.RESOLUTIONS,),
+                "preset_resolution": (cls.RESOLUTIONS,),
                 "pad_image": (
                     "BOOLEAN",
                     {
@@ -367,9 +367,9 @@ class SmartResizer:
         image: torch.Tensor,
         use_presets: bool,
         resampling: str,
-        Megapixels: float,
-        Multiple: int,
-        VIDEO_preset: str,
+        megapixels_target: float,
+        multiple_target: int,
+        preset_resolution: str,
         pad_image: bool,
         pad_left: int,
         pad_top: int,
@@ -409,19 +409,19 @@ class SmartResizer:
 
         if not use_presets:
             # Megapixel target (aspect ratio + Multiple divisibility).
-            if Megapixels <= 0:
-                Megapixels = 1.0
+            if megapixels_target <= 0:
+                megapixels_target = 1.0
 
-            target_pixels = int(Megapixels * 1_000_000)
+            target_pixels = int(megapixels_target * 1_000_000)
             target_width, target_height = self._select_megapixels_target(
                 original_width,
                 original_height,
                 target_pixels=target_pixels,
-                multiple = Multiple,
+                multiple = multiple_target,
             )
         else:
             # Resolution preset behaviour.
-            if VIDEO_preset == "480p":
+            if preset_resolution == "480p":
                 if is_square_ish:
                     target_width, target_height = 512, 512
                 else:
@@ -430,7 +430,7 @@ class SmartResizer:
                     else:  # Landscape
                         target_width, target_height = 848, 480
 
-            elif VIDEO_preset == "720p":
+            elif preset_resolution == "720p":
                 if is_square_ish:
                     target_width, target_height = 768, 768
                 else:
@@ -439,7 +439,7 @@ class SmartResizer:
                     else:  # Landscape
                         target_width, target_height = 1280, 720
 
-            elif VIDEO_preset == "1080p":
+            elif preset_resolution == "1080p":
                 if is_square_ish:
                     target_width, target_height = 1152, 1152
                 else:
@@ -447,7 +447,7 @@ class SmartResizer:
                         target_width, target_height = 1080, 1920
                     else:  # Landscape
                         target_width, target_height = 1920, 1080
-            elif VIDEO_preset == "1024px":
+            elif preset_resolution == "1024px":
                 if is_square_ish:
                     target_width, target_height = 1024, 1024
                 else:
