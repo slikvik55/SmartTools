@@ -18,6 +18,63 @@ function clamp(v, lo, hi) {
     return Math.max(lo, Math.min(hi, v));
 }
 
+/** Square resize: corners use min(w,h); edges keep opposite edge fixed and center on perpendicular axis. */
+function squareResizeFromDrag(mode, s, dx, dy) {
+    const left = s.x,
+        top = s.y,
+        right = s.x + s.w,
+        bottom = s.y + s.h;
+    const cx = s.x + s.w / 2,
+        cy = s.y + s.h / 2;
+
+    let nl = left,
+        nt = top,
+        nr = right,
+        nb = bottom;
+    if (mode.includes("w")) nl = left + dx;
+    if (mode.includes("e")) nr = right + dx;
+    if (mode.includes("n")) nt = top + dy;
+    if (mode.includes("s")) nb = bottom + dy;
+
+    if (mode === "n") {
+        const side = Math.max(MIN_SIZE, bottom - nt);
+        return { x: cx - side / 2, y: bottom - side, w: side, h: side };
+    }
+    if (mode === "s") {
+        const side = Math.max(MIN_SIZE, nb - top);
+        return { x: cx - side / 2, y: top, w: side, h: side };
+    }
+    if (mode === "e") {
+        const side = Math.max(MIN_SIZE, nr - left);
+        return { x: left, y: cy - side / 2, w: side, h: side };
+    }
+    if (mode === "w") {
+        const side = Math.max(MIN_SIZE, right - nl);
+        return { x: nr - side, y: cy - side / 2, w: side, h: side };
+    }
+
+    let w = nr - nl,
+        h = nb - nt;
+    if (w < 0) {
+        const t = nl;
+        nl = nr;
+        nr = t;
+        w = -w;
+    }
+    if (h < 0) {
+        const t = nt;
+        nt = nb;
+        nb = t;
+        h = -h;
+    }
+    const side = Math.max(MIN_SIZE, Math.min(w, h));
+    if (mode === "se") return { x: nl, y: nt, w: side, h: side };
+    if (mode === "nw") return { x: nr - side, y: nb - side, w: side, h: side };
+    if (mode === "ne") return { x: nl, y: nb - side, w: side, h: side };
+    if (mode === "sw") return { x: nr - side, y: nt, w: side, h: side };
+    return { x: nl, y: nt, w: side, h: side };
+}
+
 function parseImageWidget(widget) {
     const v = widget?.value;
     if (v && typeof v === "object") {
@@ -137,15 +194,26 @@ function openCropModal(node, imageWidget) {
 
     const spacer = document.createElement("div");
     spacer.style.flex = "1";
+    const lblSquare = document.createElement("label");
+    lblSquare.style.cssText =
+        "display:inline-flex;align-items:center;gap:6px;font-size:13px;color:#ddd;white-space:nowrap;";
+    const chkSquare = document.createElement("input");
+    chkSquare.type = "checkbox";
+    chkSquare.title = "Keep crop square while resizing from handles";
+    lblSquare.appendChild(chkSquare);
+    lblSquare.appendChild(document.createTextNode("Square"));
+
     header.appendChild(btnFit);
     header.appendChild(btnReset);
+    header.appendChild(lblSquare);
     header.appendChild(spacer);
     header.appendChild(btnApply);
     header.appendChild(btnCancel);
 
     const hint = document.createElement("span");
     hint.style.cssText = "opacity:.75;font-size:12px;width:100%;padding:0 14px 8px;";
-    hint.textContent = "Drag inside to move; handles to resize; arrows to nudge (Shift = 10 px).";
+    hint.textContent =
+        "Drag inside to move; handles to resize; enable Square for 1:1 resize; arrows to nudge (Shift = 10 px).";
     panel.appendChild(header);
     panel.appendChild(hint);
 
@@ -192,6 +260,17 @@ function openCropModal(node, imageWidget) {
         sel.y = clamp(sel.y, 0, imgH - MIN_SIZE);
         sel.w = clamp(sel.w, MIN_SIZE, imgW - sel.x);
         sel.h = clamp(sel.h, MIN_SIZE, imgH - sel.y);
+    }
+
+    function normalizeSquareSel() {
+        let side = Math.max(MIN_SIZE, Math.min(sel.w, sel.h));
+        sel.x = clamp(sel.x, 0, imgW - MIN_SIZE);
+        sel.y = clamp(sel.y, 0, imgH - MIN_SIZE);
+        side = Math.min(side, imgW - sel.x, imgH - sel.y);
+        side = Math.max(MIN_SIZE, side);
+        sel.x = clamp(sel.x, 0, imgW - side);
+        sel.y = clamp(sel.y, 0, imgH - side);
+        sel.w = sel.h = Math.min(side, imgW - sel.x, imgH - sel.y);
     }
 
     function computeFit() {
@@ -356,6 +435,10 @@ function openCropModal(node, imageWidget) {
         if (dragMode === "move") {
             sel.x += dx;
             sel.y += dy;
+            normalizeSel();
+        } else if (chkSquare.checked) {
+            sel = squareResizeFromDrag(dragMode, start.sel, dx, dy);
+            normalizeSquareSel();
         } else {
             const left = start.sel.x;
             const top = start.sel.y;
@@ -376,9 +459,8 @@ function openCropModal(node, imageWidget) {
             sel.y = nt;
             sel.w = nr - nl;
             sel.h = nb - nt;
+            normalizeSel();
         }
-
-        normalizeSel();
         draw();
     }
 
