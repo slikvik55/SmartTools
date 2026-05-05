@@ -21,8 +21,23 @@ from datetime import datetime
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
+from comfy.cli_args import args
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+def png_metadata_like_save_image(prompt=None, extra_pnginfo=None):
+    """Embed prompt / extra_pnginfo text chunks like nodes.SaveImage (PNG)."""
+    if args.disable_metadata:
+        return None
+    metadata = PngInfo()
+    if prompt is not None:
+        metadata.add_text("prompt", json.dumps(prompt))
+    if extra_pnginfo is not None:
+        for key in extra_pnginfo:
+            metadata.add_text(key, json.dumps(extra_pnginfo[key]))
+    return metadata
 
 def resolve_output_dir(filename_prefix, base_dir):
     """Parse filename_prefix into (out_dir, base_name, out_subfolder).
@@ -171,19 +186,21 @@ async def save_it_handler(request):
 
         # Open the source image
         img = Image.open(src_path)
-        
-        # Extract existing metadata from the source PNG file if it exists
+
         metadata = None
         if fmt.upper() == "PNG":
-            metadata = PngInfo()
-            # Copy all existing text chunks from source image if it's a PNG
-            if hasattr(img, 'info'):
-                for key, value in img.info.items():
-                    if isinstance(key, str) and isinstance(value, str):
-                        # Preserve workflow and prompt metadata
-                        metadata.add_text(key, value)
-        
-        # Re-save with correct format/quality and preserved metadata
+            if not args.disable_metadata:
+                if "prompt" in data or "extra_pnginfo" in data:
+                    pr = data["prompt"] if "prompt" in data else None
+                    ex = data["extra_pnginfo"] if "extra_pnginfo" in data else None
+                    metadata = png_metadata_like_save_image(pr, ex)
+                else:
+                    metadata = PngInfo()
+                    if hasattr(img, "info"):
+                        for key, value in img.info.items():
+                            if isinstance(key, str) and isinstance(value, str):
+                                metadata.add_text(key, value)
+
         save_pil_image(img, dst_path, fmt, quality, metadata=metadata)
 
         return web.Response(status=200, text=f"Saved to {dst_path}")
@@ -387,13 +404,7 @@ def save_images_with_metadata(images, output_dir, save_type, prompt=None, extra_
             arr = (255. * arr).clip(0, 255).astype('uint8')
 
         img = Image.fromarray(arr)
-        metadata = PngInfo()
-
-        if prompt:
-            metadata.add_text("prompt", json.dumps(prompt))
-        if extra_pnginfo:
-            for key, value in extra_pnginfo.items():
-                metadata.add_text(key, json.dumps(value))
+        metadata = png_metadata_like_save_image(prompt, extra_pnginfo)
 
         file = f"{filename.replace('%batch_num%', str(batch_number))}_{counter:05}_.png"
         img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=compress_level)
@@ -405,7 +416,8 @@ def save_images_with_metadata(images, output_dir, save_type, prompt=None, extra_
 
 # ─── REPLACED: Compare Functionality ────────
 
-def save_compare_images(image_a, original_image, filename_prefix, compress_level=4):
+def save_compare_images(image_a, original_image, filename_prefix, compress_level=4,
+                        prompt=None, extra_pnginfo=None):
     """
     Replacement for previous compare helper.
     
@@ -462,7 +474,8 @@ def save_compare_images(image_a, original_image, filename_prefix, compress_level
 
         img = Image.fromarray(arr)
         file = f"{filename}_{counter:05}_.png"
-        img.save(os.path.join(full_output_folder, file), compress_level=compress_level)
+        png_meta = png_metadata_like_save_image(prompt, extra_pnginfo)
+        img.save(os.path.join(full_output_folder, file), pnginfo=png_meta, compress_level=compress_level)
         entry = {"filename": file, "subfolder": subfolder, "type": "temp"}
         counter += 1
         return entry
@@ -577,7 +590,9 @@ class SmartSave:
                 image_a=images,
                 original_image=original_image,
                 filename_prefix=temp_prefix,
-                compress_level=self.compress_level
+                compress_level=self.compress_level,
+                prompt=prompt,
+                extra_pnginfo=extra_pnginfo,
             )
             # `save_compare_images` returns a dict in the form {"ui": {"images": [...]}}
             return compare_ui
@@ -614,12 +629,7 @@ class SmartSave:
                     arr = (255. * arr).clip(0, 255).astype('uint8')
 
                 img = Image.fromarray(arr)
-                metadata = PngInfo()
-                if prompt:
-                    metadata.add_text("prompt", json.dumps(prompt))
-                if extra_pnginfo:
-                    for key, value in extra_pnginfo.items():
-                        metadata.add_text(key, json.dumps(value))
+                metadata = png_metadata_like_save_image(prompt, extra_pnginfo)
 
                 if current_prompt_id != self.last_prompt_id:
                     self.last_prompt_id = current_prompt_id

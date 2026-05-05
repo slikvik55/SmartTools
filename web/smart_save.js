@@ -28,6 +28,33 @@ app.registerExtension({
             const getQuality = () => getWidget("quality")?.value ?? 95;
             const getTimestamp = () => getWidget("use_timestamp")?.value ?? false;
 
+            /** Same PNG chunks as SaveImage: prompt (API graph) + extra_pnginfo.workflow (UI graph). */
+            async function getWorkflowMetadataForSave() {
+                try {
+                    const graph = app.graph ?? app.rootGraph;
+                    if (!graph || typeof app.graphToPrompt !== "function") {
+                        return {};
+                    }
+                    const data =
+                        app.graphToPrompt.length >= 1
+                            ? await app.graphToPrompt(graph)
+                            : await app.graphToPrompt();
+                    const workflow = data.workflow;
+                    const promptOut = data.output ?? data.prompt;
+                    const meta = {};
+                    if (promptOut !== undefined) {
+                        meta.prompt = promptOut;
+                    }
+                    if (workflow) {
+                        meta.extra_pnginfo = { workflow };
+                    }
+                    return meta;
+                } catch (e) {
+                    console.warn("Smart Save: could not serialize workflow for PNG metadata", e);
+                    return {};
+                }
+            }
+
             // ── Toast notification ─────────────────────────────────────────
             function showToast(message, isError = false) {
                 const existing = document.getElementById("save_it_toast");
@@ -416,10 +443,23 @@ app.registerExtension({
                         const quality = getQuality();
                         const use_timestamp = getTimestamp();
 
+                        const meta = await getWorkflowMetadataForSave();
+                        const bodyPayload = {
+                            filename,
+                            subfolder,
+                            type,
+                            filename_prefix,
+                            format,
+                            quality,
+                            use_timestamp
+                        };
+                        if ("prompt" in meta) bodyPayload.prompt = meta.prompt;
+                        if ("extra_pnginfo" in meta) bodyPayload.extra_pnginfo = meta.extra_pnginfo;
+
                         const response = await api.fetchApi("/smart_tools/save_it/save", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ filename, subfolder, type, filename_prefix, format, quality, use_timestamp })
+                            body: JSON.stringify(bodyPayload)
                         });
 
                         if (response.ok) {
