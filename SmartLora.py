@@ -74,14 +74,36 @@ class SmartLora:
                         ),
                     },
                 ),
+                "prompt": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional string from another node. If connected, "
+                            "prepended to prompt text with a line break."
+                        ),
+                    },
+                ),
+                "prompt_text": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "Optional multiline text for the prompt output; "
+                            "empty if unset."
+                        ),
+                    },
+                ),
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP")
-    RETURN_NAMES = ("model", "clip")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
+    RETURN_NAMES = ("model", "clip", "prompt")
     OUTPUT_TOOLTIPS = (
         "Model with all enabled LoRAs applied in slot order.",
         "CLIP after enabled LoRAs, or None if CLIP was not connected.",
+        "Combined prompt: optional prompt input (if any), line break, optional prompt text.",
     )
     FUNCTION = "apply_loras"
 
@@ -99,10 +121,19 @@ class SmartLora:
             self._lora_cache[path] = comfy.utils.load_torch_file(path, safe_load=True)
         return self._lora_cache[path]
 
+    def _merge_prompt(self, prompt_input, prompt_text):
+        box = "" if prompt_text is None else str(prompt_text)
+        if prompt_input is not None and str(prompt_input).strip():
+            head = str(prompt_input).rstrip()
+            return head + "\n" + box
+        return box
+
     def apply_loras(
         self,
         model,
         clip=None,
+        prompt=None,
+        prompt_text=None,
         lora_1_enabled=True,
         lora_1_name=None,
         lora_1_strength_model=1.0,
@@ -172,7 +203,8 @@ class SmartLora:
             lora = self._get_lora(name)
             m, c = comfy.sd.load_lora_for_models(m, c, lora, sm_eff, sc_eff)
 
-        return (m, c)
+        out_prompt = self._merge_prompt(prompt, prompt_text)
+        return (m, c, out_prompt)
 
 
 NODE_CLASS_MAPPINGS = {
