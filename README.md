@@ -1,6 +1,6 @@
 # SmartTools
 
-Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI). Category: **slikvik** / **slikvik/Image**.
+Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI). Category: **slikvik** / **slikvik/Image** / **slikvik/LLM**.
 
 ## Installation
 
@@ -9,6 +9,8 @@ Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI). Category:
 2. Restart ComfyUI.
 
 Dependencies match a typical ComfyUI install: **PyTorch**, **NumPy**, **Pillow**. **Smart Save** also uses ComfyUI’s `folder_paths`, `comfy.cli_args`, and the Comfy server for the save route.
+
+**Smart LLM** is optional: install Transformers-related packages from [`requirements-llm.txt`](requirements-llm.txt) into the same Python environment as ComfyUI (see that file for versions).
 
 ## Nodes
 
@@ -50,6 +52,27 @@ Same PNG output and metadata behaviour as ComfyUI’s built-in **Save Image** (`
 3. Click **Save Image** to write PNGs to the output directory.
 
 Requires the included **web** extension (`web/smart_save.js`); restart ComfyUI after installing or updating this pack.
+
+---
+
+### Smart LLM
+
+**Display name:** Smart LLM  
+**Category:** `slikvik/LLM`
+
+Runs **Google Gemma 4** instruction checkpoints from a **local Hugging Face model folder** (full snapshot: `config.json`, tokenizer / processor files, and `*.safetensors` or a sharded `model.safetensors.index.json`). Inference uses **Hugging Face Transformers** (`AutoModelForImageTextToText` + `AutoProcessor`); there is no GGUF or llama.cpp dependency.
+
+| Input | Notes |
+|--------|--------|
+| `model_folder` | Absolute or `~` path to the directory you downloaded (e.g. with `huggingface-cli download google/gemma-4-2b-it --local-dir ...`). Must contain `config.json` and safetensors weights. |
+| `system_prompt` | Optional multiline system message. |
+| `prompt` | Multiline user prompt. |
+| `unload_model` | **ON** — after generation, drop the model and processor from memory and call CUDA cache cleanup so later nodes get more VRAM. **OFF** — keep the model loaded for the next run (same `model_folder` path). |
+| `image` | Optional. When connected, the first batch frame is sent as a PNG data URI in the chat template (vision mode). |
+
+**VRAM:** Full Gemma 4 checkpoints are large; use a size and dtype your GPU can hold, or explore quantization in Transformers separately. CUDA uses `device_map="auto"` (requires **`accelerate`**).
+
+**Transformers version:** Gemma 4 needs **`transformers` 5.5.0 or newer** (first release with Gemma 4); see [`requirements-llm.txt`](requirements-llm.txt).
 
 ## Author
 
