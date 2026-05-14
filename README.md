@@ -67,8 +67,11 @@ Runs **Google Gemma 4** instruction checkpoints from a **local Hugging Face mode
 | `model_folder` | Absolute or `~` path to the directory you downloaded (e.g. with `huggingface-cli download google/gemma-4-2b-it --local-dir ...`). Must contain `config.json` and safetensors weights. |
 | `system_prompt` | Optional multiline system message. |
 | `prompt` | Multiline user prompt. |
+| `attn_implementation` | Transformers attention: **`sdpa`** (default), **`eager`**, or **`flash_attention_2`** (requires `flash-attn` + CUDA; falls back to SDPA with a warning if unavailable). |
 | `unload_model` | **ON** — after generation, drop the model and processor from memory and call CUDA cache cleanup so later nodes get more VRAM. **OFF** — keep the model loaded for the next run (same `model_folder` path). |
 | `image` | Optional. When connected, the first batch frame is sent as a PNG data URI in the chat template (vision mode). |
+
+**Sage Attention vs Smart LLM:** ComfyUI’s **Sage Attention** (the `sageattention` package and flags such as `--use-sage-attention`) plugs into **diffusion** sampling (`comfy` attention). **Smart LLM does not use Sage**; Gemma runs inside Hugging Face and only supports the backends above—not `sageattention`.
 
 **VRAM:** Full Gemma 4 checkpoints are large; use a size and dtype your GPU can hold, or explore quantization in Transformers separately. CUDA uses `device_map="auto"` (requires **`accelerate`**).
 

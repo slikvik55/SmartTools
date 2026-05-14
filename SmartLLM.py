@@ -10,6 +10,7 @@ import base64
 import gc
 import io
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,9 @@ from typing import Any
 import numpy as np
 import torch
 
-_CACHE: dict[str, dict[str, Any]] = {}
+logger = logging.getLogger(__name__)
+
+_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _require_transformers():
@@ -209,8 +212,38 @@ def _load_processor(resolved_folder: str, local_files_only: bool = True) -> Any:
     )
 
 
-def _free_cache_entry(key: str) -> None:
-    entry = _CACHE.pop(key, None)
+def _normalize_attn(value: str) -> str:
+    v = (value or "sdpa").strip().lower()
+    return v if v in ("sdpa", "eager", "flash_attention_2") else "sdpa"
+
+
+def _flash_attn_usable() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        import flash_attn  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _effective_attn_implementation(normalized: str) -> str:
+    if normalized == "flash_attention_2":
+        if not _flash_attn_usable():
+            if torch.cuda.is_available():
+                logger.warning(
+                    "SmartLLM: flash_attention_2 requires the flash-attn package; using sdpa instead."
+                )
+                return "sdpa"
+            logger.warning(
+                "SmartLLM: flash_attention_2 requires CUDA; using eager instead."
+            )
+            return "eager"
+    return normalized
+
+
+def _free_cache_entry(cache_key: tuple[str, str]) -> None:
+    entry = _CACHE.pop(cache_key, None)
     if not entry:
         return
     model = entry.get("model")
@@ -222,12 +255,15 @@ def _free_cache_entry(key: str) -> None:
         torch.cuda.empty_cache()
 
 
-def _load_model(resolved_folder: str):
-    if resolved_folder in _CACHE:
-        return _CACHE[resolved_folder]["model"], _CACHE[resolved_folder]["processor"]
+def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tuple[Any, Any]:
+    norm = _normalize_attn(attn_implementation)
+    cache_key = (resolved_folder, norm)
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]["model"], _CACHE[cache_key]["processor"]
 
     AutoModelForImageTextToText, _ = _require_transformers()
     dtype = _pick_dtype()
+    attn_eff = _effective_attn_implementation(norm)
 
     processor = _load_processor(resolved_folder, local_files_only=True)
 
@@ -237,16 +273,26 @@ def _load_model(resolved_folder: str):
     }
     if torch.cuda.is_available():
         load_kw["device_map"] = "auto"
-        load_kw["attn_implementation"] = "sdpa"
+        load_kw["attn_implementation"] = attn_eff
+    else:
+        load_kw["attn_implementation"] = attn_eff
+
     try:
         model = AutoModelForImageTextToText.from_pretrained(resolved_folder, **load_kw)
-    except (TypeError, ValueError):
-        load_kw.pop("attn_implementation", None)
+    except (TypeError, ValueError, ImportError, RuntimeError, OSError) as e:
+        if load_kw.pop("attn_implementation", None) is None:
+            raise
+        logger.warning(
+            "SmartLLM: attn_implementation=%r failed (%s: %s); loading without attn_implementation.",
+            attn_eff,
+            type(e).__name__,
+            e,
+        )
         model = AutoModelForImageTextToText.from_pretrained(resolved_folder, **load_kw)
     if not torch.cuda.is_available():
         model = model.to("cpu")
 
-    _CACHE[resolved_folder] = {"model": model, "processor": processor}
+    _CACHE[cache_key] = {"model": model, "processor": processor}
     return model, processor
 
 
@@ -303,6 +349,16 @@ class SmartLLM:
                         "tooltip": "User prompt / instruction.",
                     },
                 ),
+                "attn_implementation": (
+                    ["sdpa", "eager", "flash_attention_2"],
+                    {
+                        "default": "sdpa",
+                        "tooltip": (
+                            "Hugging Face attention backend. flash_attention_2 needs flash-attn + CUDA "
+                            "(falls back if missing). Not ComfyUI Sage Attention."
+                        ),
+                    },
+                ),
                 "unload_model": (
                     "BOOLEAN",
                     {
@@ -338,6 +394,7 @@ class SmartLLM:
         model_folder: str,
         system_prompt: str,
         prompt: str,
+        attn_implementation: str,
         unload_model: bool,
         image: torch.Tensor | None = None,
     ):
@@ -346,17 +403,20 @@ class SmartLLM:
         else:
             t = image.detach().cpu()
             img_key = (tuple(t.shape), float(t.sum()), float(t.abs().sum()))
-        return (model_folder, system_prompt, prompt, unload_model, img_key)
+        return (model_folder, system_prompt, prompt, attn_implementation, unload_model, img_key)
 
     def run(
         self,
         model_folder: str,
         system_prompt: str,
         prompt: str,
+        attn_implementation: str,
         unload_model: bool,
         image: torch.Tensor | None = None,
     ):
         resolved = _validate_model_folder(model_folder)
+        attn_norm = _normalize_attn(attn_implementation)
+        cache_key = (resolved, attn_norm)
 
         image_url: str | None = None
         if image is not None:
@@ -365,7 +425,7 @@ class SmartLLM:
 
         messages = _build_messages(system_prompt, prompt, image_url)
 
-        model, processor = _load_model(resolved)
+        model, processor = _load_model(resolved, attn_norm)
 
         inputs = processor.apply_chat_template(
             messages,
@@ -389,7 +449,7 @@ class SmartLLM:
         text = tok.decode(new_tokens.tolist(), skip_special_tokens=True)
 
         if unload_model:
-            _free_cache_entry(resolved)
+            _free_cache_entry(cache_key)
 
         return (text,)
 
