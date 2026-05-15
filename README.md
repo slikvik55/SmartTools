@@ -69,11 +69,12 @@ Runs **Google Gemma 4** instruction checkpoints from a **local Hugging Face mode
 | `prompt` | Multiline user prompt. |
 | `attn_implementation` | Transformers attention: **`sdpa`** (default), **`eager`**, or **`flash_attention_2`** (requires `flash-attn` + CUDA; falls back to SDPA with a warning if unavailable). |
 | `unload_model` | **ON** — after generation, drop the model and processor from memory and call CUDA cache cleanup so later nodes get more VRAM. **OFF** — keep the model loaded for the next run (same `model_folder` path). |
-| `image` | Optional. When connected, the first batch frame is sent as a PNG data URI in the chat template (vision mode). |
+| `image` | Optional. First image (first batch frame) as a PNG data URI in the user message. |
+| `image_2` | Optional. Second image (first batch frame), appended after `image` before the text prompt. |
 
 **Sage Attention vs Smart LLM:** ComfyUI’s **Sage Attention** (the `sageattention` package and flags such as `--use-sage-attention`) plugs into **diffusion** sampling (`comfy` attention). **Smart LLM does not use Sage**; Gemma runs inside Hugging Face and only supports the backends above—not `sageattention`.
 
-**VRAM:** Full Gemma 4 checkpoints are large; use a size and dtype your GPU can hold, or explore quantization in Transformers separately. CUDA uses `device_map="auto"` (requires **`accelerate`**).
+**VRAM:** Full Gemma 4 checkpoints are large; use a size and dtype your GPU can hold, or explore quantization in Transformers separately. CUDA uses `device_map="auto"` (requires **`accelerate`**). With **Unload OFF**, the same `model_folder` + `attn_implementation` pair reuses one in-memory model (no reload each run). Changing **`model_folder`** drops any cached weights for other folders first. Changing **attention backend** replaces the previous cached copy for that folder so VRAM does not stack. (If you use several Smart LLM nodes with different folders in one workflow, the cache holds one folder at a time—whichever loads last—so the other path may reload on its next run.)
 
 **Transformers version:** Gemma 4 needs **`transformers` 5.5.0 or newer** (first release with Gemma 4); see [`requirements-llm.txt`](requirements-llm.txt).
 

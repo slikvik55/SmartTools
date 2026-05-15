@@ -261,6 +261,28 @@ def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tupl
     if cache_key in _CACHE:
         return _CACHE[cache_key]["model"], _CACHE[cache_key]["processor"]
 
+    # Drop weights for any other model_folder so switching paths does not leave old models in VRAM.
+    for k in list(_CACHE.keys()):
+        if k[0] != resolved_folder:
+            logger.info(
+                "SmartLLM: unloading cached model for different model_folder %r (loading %r).",
+                k[0],
+                resolved_folder,
+            )
+            _free_cache_entry(k)
+
+    # Only one cached model per folder: a different attn_implementation would otherwise
+    # leave the previous model in _CACHE forever when Unload is OFF (2x+ VRAM, slower system).
+    for k in list(_CACHE.keys()):
+        if k[0] == resolved_folder and k != cache_key:
+            logger.info(
+                "SmartLLM: unloading previous cached weights for %r (cache key was %r, now %r).",
+                resolved_folder,
+                k[1],
+                norm,
+            )
+            _free_cache_entry(k)
+
     AutoModelForImageTextToText, _ = _require_transformers()
     dtype = _pick_dtype()
     attn_eff = _effective_attn_implementation(norm)
@@ -292,14 +314,22 @@ def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tupl
     if not torch.cuda.is_available():
         model = model.to("cpu")
 
+    model.eval()
     _CACHE[cache_key] = {"model": model, "processor": processor}
     return model, processor
+
+
+def _image_tensor_cache_key(image: torch.Tensor | None) -> Any:
+    if image is None:
+        return None
+    t = image.detach().cpu()
+    return (tuple(t.shape), float(t.sum()), float(t.abs().sum()))
 
 
 def _build_messages(
     system_prompt: str,
     user_prompt: str,
-    image_url: str | None,
+    image_urls: list[str],
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     sys_stripped = (system_prompt or "").strip()
@@ -311,8 +341,8 @@ def _build_messages(
             }
         )
     user_content: list[dict[str, Any]] = []
-    if image_url is not None:
-        user_content.append({"type": "image", "url": image_url})
+    for url in image_urls:
+        user_content.append({"type": "image", "url": url})
     user_content.append({"type": "text", "text": user_prompt or ""})
     messages.append({"role": "user", "content": user_content})
     return messages
@@ -372,7 +402,11 @@ class SmartLLM:
             "optional": {
                 "image": (
                     "IMAGE",
-                    {"tooltip": "Optional. When connected, runs in multimodal (vision) mode."},
+                    {"tooltip": "Optional. First image (batch index 0) for multimodal chat."},
+                ),
+                "image_2": (
+                    "IMAGE",
+                    {"tooltip": "Optional. Second image (batch index 0), after `image` in the prompt."},
                 ),
             },
         }
@@ -385,7 +419,7 @@ class SmartLLM:
     DISPLAY_NAME = "Smart LLM"
     DESCRIPTION = (
         "Gemma 4 via Hugging Face Transformers from a local snapshot folder (safetensors). "
-        "Optional image enables vision mode."
+        "Optional `image` / `image_2` enable multimodal (vision) mode."
     )
 
     @classmethod
@@ -397,13 +431,17 @@ class SmartLLM:
         attn_implementation: str,
         unload_model: bool,
         image: torch.Tensor | None = None,
+        image_2: torch.Tensor | None = None,
     ):
-        if image is None:
-            img_key = None
-        else:
-            t = image.detach().cpu()
-            img_key = (tuple(t.shape), float(t.sum()), float(t.abs().sum()))
-        return (model_folder, system_prompt, prompt, attn_implementation, unload_model, img_key)
+        return (
+            model_folder,
+            system_prompt,
+            prompt,
+            attn_implementation,
+            unload_model,
+            _image_tensor_cache_key(image),
+            _image_tensor_cache_key(image_2),
+        )
 
     def run(
         self,
@@ -413,17 +451,19 @@ class SmartLLM:
         attn_implementation: str,
         unload_model: bool,
         image: torch.Tensor | None = None,
+        image_2: torch.Tensor | None = None,
     ):
         resolved = _validate_model_folder(model_folder)
         attn_norm = _normalize_attn(attn_implementation)
         cache_key = (resolved, attn_norm)
 
-        image_url: str | None = None
+        image_urls: list[str] = []
         if image is not None:
-            pil = _comfy_image_to_pil(image)
-            image_url = _pil_to_data_uri(pil)
+            image_urls.append(_pil_to_data_uri(_comfy_image_to_pil(image)))
+        if image_2 is not None:
+            image_urls.append(_pil_to_data_uri(_comfy_image_to_pil(image_2)))
 
-        messages = _build_messages(system_prompt, prompt, image_url)
+        messages = _build_messages(system_prompt, prompt, image_urls)
 
         model, processor = _load_model(resolved, attn_norm)
 
@@ -440,13 +480,20 @@ class SmartLLM:
         input_len = int(inputs["input_ids"].shape[1])
 
         gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": 512}
-        out_ids = model.generate(**gen_kw)
+        with torch.inference_mode():
+            out_ids = model.generate(**gen_kw)
 
         new_tokens = out_ids[0, input_len:]
+        ids_list = new_tokens.detach().cpu().tolist()
+        del inputs
+        del gen_kw
+        del new_tokens
+        del out_ids
+
         tok = getattr(processor, "tokenizer", None)
         if tok is None:
             raise RuntimeError("SmartLLM: processor has no tokenizer attribute.")
-        text = tok.decode(new_tokens.tolist(), skip_special_tokens=True)
+        text = tok.decode(ids_list, skip_special_tokens=True)
 
         if unload_model:
             _free_cache_entry(cache_key)
