@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import base64
 import gc
-import io
 import json
 import logging
 import os
@@ -63,13 +61,6 @@ def _comfy_image_to_pil(image: torch.Tensor) -> Any:
     frame = image[0].detach().cpu().clamp(0.0, 1.0).numpy()
     rgb = (frame * 255.0).round().astype(np.uint8)
     return Image.fromarray(rgb, mode="RGB")
-
-
-def _pil_to_data_uri(pil_image: Any) -> str:
-    buf = io.BytesIO()
-    pil_image.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{b64}"
 
 
 def _pick_dtype():
@@ -326,11 +317,13 @@ def _image_tensor_cache_key(image: torch.Tensor | None) -> Any:
     return (tuple(t.shape), float(t.sum()), float(t.abs().sum()))
 
 
-def _build_messages(
+def _prepare_processor_inputs(
+    processor: Any,
     system_prompt: str,
     user_prompt: str,
-    image_urls: list[str],
-) -> list[dict[str, Any]]:
+    pil_images: list[Any],
+) -> Any:
+    """HF multimodal pattern: render chat as text, pass PIL images into the processor."""
     messages: list[dict[str, Any]] = []
     sys_stripped = (system_prompt or "").strip()
     if sys_stripped:
@@ -341,11 +334,20 @@ def _build_messages(
             }
         )
     user_content: list[dict[str, Any]] = []
-    for url in image_urls:
-        user_content.append({"type": "image", "url": url})
+    for pil in pil_images:
+        user_content.append({"type": "image", "image": pil})
     user_content.append({"type": "text", "text": user_prompt or ""})
     messages.append({"role": "user", "content": user_content})
-    return messages
+
+    chat_str = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    proc_kw: dict[str, Any] = {"text": chat_str, "return_tensors": "pt"}
+    if pil_images:
+        proc_kw["images"] = pil_images
+    return processor(**proc_kw)
 
 
 class SmartLLM:
@@ -377,6 +379,16 @@ class SmartLLM:
                         "default": "",
                         "multiline": True,
                         "tooltip": "User prompt / instruction.",
+                    },
+                ),
+                "max_tokens": (
+                    "INT",
+                    {
+                        "default": 512,
+                        "min": 1,
+                        "max": 8192,
+                        "step": 1,
+                        "tooltip": "Maximum new tokens to generate (decode budget). Raise if replies look cut off.",
                     },
                 ),
                 "attn_implementation": (
@@ -428,6 +440,7 @@ class SmartLLM:
         model_folder: str,
         system_prompt: str,
         prompt: str,
+        max_tokens: int,
         attn_implementation: str,
         unload_model: bool,
         image: torch.Tensor | None = None,
@@ -437,6 +450,7 @@ class SmartLLM:
             model_folder,
             system_prompt,
             prompt,
+            max_tokens,
             attn_implementation,
             unload_model,
             _image_tensor_cache_key(image),
@@ -448,6 +462,7 @@ class SmartLLM:
         model_folder: str,
         system_prompt: str,
         prompt: str,
+        max_tokens: int,
         attn_implementation: str,
         unload_model: bool,
         image: torch.Tensor | None = None,
@@ -457,29 +472,21 @@ class SmartLLM:
         attn_norm = _normalize_attn(attn_implementation)
         cache_key = (resolved, attn_norm)
 
-        image_urls: list[str] = []
+        pil_images: list[Any] = []
         if image is not None:
-            image_urls.append(_pil_to_data_uri(_comfy_image_to_pil(image)))
+            pil_images.append(_comfy_image_to_pil(image))
         if image_2 is not None:
-            image_urls.append(_pil_to_data_uri(_comfy_image_to_pil(image_2)))
-
-        messages = _build_messages(system_prompt, prompt, image_urls)
+            pil_images.append(_comfy_image_to_pil(image_2))
 
         model, processor = _load_model(resolved, attn_norm)
 
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            add_generation_prompt=True,
-        )
+        inputs = _prepare_processor_inputs(processor, system_prompt, prompt, pil_images)
         device = next(model.parameters()).device
         inputs = _move_batch_to_device(inputs, device)
 
         input_len = int(inputs["input_ids"].shape[1])
 
-        gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": 512}
+        gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": int(max_tokens)}
         with torch.inference_mode():
             out_ids = model.generate(**gen_kw)
 

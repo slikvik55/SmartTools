@@ -67,10 +67,11 @@ Runs **Google Gemma 4** instruction checkpoints from a **local Hugging Face mode
 | `model_folder` | Absolute or `~` path to the directory you downloaded (e.g. with `huggingface-cli download google/gemma-4-2b-it --local-dir ...`). Must contain `config.json` and safetensors weights. |
 | `system_prompt` | Optional multiline system message. |
 | `prompt` | Multiline user prompt. |
+| `max_tokens` | Cap on **new** tokens decoded after the prompt (same idea as `max_new_tokens` in Transformers). Increase if output looks truncated. |
 | `attn_implementation` | Transformers attention: **`sdpa`** (default), **`eager`**, or **`flash_attention_2`** (requires `flash-attn` + CUDA; falls back to SDPA with a warning if unavailable). |
 | `unload_model` | **ON** — after generation, drop the model and processor from memory and call CUDA cache cleanup so later nodes get more VRAM. **OFF** — keep the model loaded for the next run (same `model_folder` path). |
-| `image` | Optional. First image (first batch frame) as a PNG data URI in the user message. |
-| `image_2` | Optional. Second image (first batch frame), appended after `image` before the text prompt. |
+| `image` | Optional. First batch frame as RGB PIL inside the HF processor (same pattern as reference VL nodes). |
+| `image_2` | Optional. Second batch frame, after `image`, passed as PIL to the processor. |
 
 **Sage Attention vs Smart LLM:** ComfyUI’s **Sage Attention** (the `sageattention` package and flags such as `--use-sage-attention`) plugs into **diffusion** sampling (`comfy` attention). **Smart LLM does not use Sage**; Gemma runs inside Hugging Face and only supports the backends above—not `sageattention`.
 
