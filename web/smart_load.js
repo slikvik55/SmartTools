@@ -598,28 +598,21 @@ app.registerExtension({
 
             hideIntWidgets(node);
 
-            const row = document.createElement("div");
-            row.style.cssText = "display:flex;gap:8px;align-items:center;padding:4px 0;";
-            const btn = document.createElement("button");
-            btn.type = "button";
-            btn.textContent = "Crop…";
-            btn.style.cssText =
-                "flex:1;border:1px solid rgba(127,127,127,.35);background:rgba(127,127,127,.15);" +
-                "padding:8px 10px;border-radius:8px;cursor:pointer;color:#eee;";
-            btn.onclick = () => {
-                const iw = node.widgets?.find((w) => w.name === "image");
-                if (iw) openCropModal(node, iw);
-            };
-            row.appendChild(btn);
-
-            if (typeof node.addDOMWidget === "function") {
-                node.addDOMWidget("smartload_crop_open", "custom", row);
-            } else {
-                node.addWidget("button", "Crop…", null, () => {
+            const cropWidget = node.addWidget(
+                "button",
+                "smartload_crop_open",
+                "crop",
+                () => {
                     const iw = node.widgets?.find((w) => w.name === "image");
                     if (iw) openCropModal(node, iw);
-                });
-            }
+                },
+                {
+                    serialize: false,
+                    canvasOnly: true,
+                }
+            );
+            cropWidget.label = "Crop...";
+            cropWidget.serialize = false;
 
             attachImageSync(node);
             queueMicrotask(() => hideIntWidgets(node));
