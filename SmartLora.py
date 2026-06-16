@@ -1,7 +1,7 @@
 #
 # SmartLora.py
 #
-# Load LoRA–style node with optional CLIP, up to 5 LoRAs, per-slot enable toggles.
+# Load LoRA–style node for model-only LoRA application, up to 5 LoRAs.
 #
 
 import comfy.sd
@@ -10,7 +10,7 @@ import folder_paths
 
 
 class SmartLora:
-    """Like Load LoRA, but optional CLIP in/out, five stacked slots with enable switches."""
+    """Like Load LoRA, but model-only with five stacked slots and enable switches."""
 
     def __init__(self):
         self._lora_cache = {}
@@ -51,29 +51,10 @@ class SmartLora:
                     "tooltip": "Strength on the diffusion model (can be negative).",
                 },
             )
-            req[f"lora_{i}_strength_clip"] = (
-                "FLOAT",
-                {
-                    "default": 1.0,
-                    "min": -100.0,
-                    "max": 100.0,
-                    "step": 0.01,
-                    "tooltip": "Strength on CLIP when a CLIP input is connected.",
-                },
-            )
 
         return {
             "required": req,
             "optional": {
-                "clip": (
-                    "CLIP",
-                    {
-                        "tooltip": (
-                            "Optional. Leave disconnected for model-only LoRA; "
-                            "CLIP output will be None."
-                        ),
-                    },
-                ),
                 "prompt": (
                     "STRING",
                     {
@@ -98,11 +79,10 @@ class SmartLora:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("model", "clip", "prompt")
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "prompt")
     OUTPUT_TOOLTIPS = (
         "Model with all enabled LoRAs applied in slot order.",
-        "CLIP after enabled LoRAs, or None if CLIP was not connected.",
         "Combined prompt: optional prompt input (if any), line break, optional prompt text.",
     )
     FUNCTION = "apply_loras"
@@ -110,8 +90,8 @@ class SmartLora:
     CATEGORY = "slikvik"
     DISPLAY_NAME = "Smart Lora"
     DESCRIPTION = (
-        "Applies up to five LoRAs in order (like chaining Load LoRA). "
-        "CLIP input and output are optional for model-only workflows."
+        "Applies up to five LoRAs to the diffusion model in order "
+        "(like chaining model-only Load LoRA nodes)."
     )
     SEARCH_ALIASES = ["lora", "smart lora", "multi lora", "lora stack"]
 
@@ -131,80 +111,67 @@ class SmartLora:
     def apply_loras(
         self,
         model,
-        clip=None,
         prompt=None,
         prompt_text=None,
         lora_1_enabled=True,
         lora_1_name=None,
         lora_1_strength_model=1.0,
-        lora_1_strength_clip=1.0,
         lora_2_enabled=False,
         lora_2_name=None,
         lora_2_strength_model=1.0,
-        lora_2_strength_clip=1.0,
         lora_3_enabled=False,
         lora_3_name=None,
         lora_3_strength_model=1.0,
-        lora_3_strength_clip=1.0,
         lora_4_enabled=False,
         lora_4_name=None,
         lora_4_strength_model=1.0,
-        lora_4_strength_clip=1.0,
         lora_5_enabled=False,
         lora_5_name=None,
         lora_5_strength_model=1.0,
-        lora_5_strength_clip=1.0,
     ):
         slots = [
             (
                 lora_1_enabled,
                 lora_1_name,
                 lora_1_strength_model,
-                lora_1_strength_clip,
             ),
             (
                 lora_2_enabled,
                 lora_2_name,
                 lora_2_strength_model,
-                lora_2_strength_clip,
             ),
             (
                 lora_3_enabled,
                 lora_3_name,
                 lora_3_strength_model,
-                lora_3_strength_clip,
             ),
             (
                 lora_4_enabled,
                 lora_4_name,
                 lora_4_strength_model,
-                lora_4_strength_clip,
             ),
             (
                 lora_5_enabled,
                 lora_5_name,
                 lora_5_strength_model,
-                lora_5_strength_clip,
             ),
         ]
 
         m = model
-        c = clip
 
-        for enabled, name, sm, sc in slots:
+        for enabled, name, sm in slots:
             if not enabled or not name:
                 continue
 
             sm_eff = float(sm)
-            sc_eff = 0.0 if c is None else float(sc)
-            if sm_eff == 0 and sc_eff == 0:
+            if sm_eff == 0:
                 continue
 
             lora = self._get_lora(name)
-            m, c = comfy.sd.load_lora_for_models(m, c, lora, sm_eff, sc_eff)
+            m, _ = comfy.sd.load_lora_for_models(m, None, lora, sm_eff, 0.0)
 
         out_prompt = self._merge_prompt(prompt, prompt_text)
-        return (m, c, out_prompt)
+        return (m, out_prompt)
 
 
 NODE_CLASS_MAPPINGS = {
