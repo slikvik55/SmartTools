@@ -55,6 +55,37 @@ Requires the included **web** extension (`web/smart_save.js`); restart ComfyUI a
 
 ---
 
+### Smart Lora
+
+**Display name:** Smart Lora  
+**Category:** `slikvik`
+
+Applies two **independent** lists of **model-only** LoRAs in one node: **high** LoRAs to the high-noise model and **low** LoRAs to the low-noise model (e.g. for split high/low-noise model setups). No CLIP is touched.
+
+| Input / Output | Notes |
+|--------|--------|
+| `model_high` (in/out) | Optional. High-noise diffusion model; **high** LoRAs are applied to it. If left unconnected, the output is `None`. |
+| `model_low` (in/out) | Optional. Low-noise diffusion model; **low** LoRAs are applied to it. If left unconnected, the output is `None`. |
+| `prompt` (in) | Optional string from another node; if connected it is prepended to the prompt text with a line break. |
+| `prompt` (out) | Combined prompt: optional `prompt` input, line break, then `prompt_text`. |
+
+**LoRA lists (custom UI):** Use **Add Lora (High)** / **Add Lora (Low)** to add rows to each group. Each row has:
+
+- a **name** field (click to open a searchable LoRA picker),
+- a **strength** box (click to type a value; negative values allowed),
+- an **enable** toggle, and
+- a **delete** button (`✕`).
+
+High LoRAs apply to `model_high` and low LoRAs to `model_low`, in list order, only when their toggle is on and strength is non-zero.
+
+**Resizing:** Drag the node wider/narrower and the rows reflow horizontally. Drag it taller/shorter and only the `prompt_text` box grows or shrinks; the LoRA rows and buttons stay fixed.
+
+**Persistence:** The full LoRA configuration is stored as JSON on the node (in `node.properties` / the hidden `lora_config` input) and is sent to the backend, so workflows reload exactly as saved.
+
+Requires the included **web** extension (`web/smart_lora.js`); restart ComfyUI after installing or updating this pack.
+
+---
+
 ### Smart LLM
 
 **Display name:** Smart LLM  

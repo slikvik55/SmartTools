@@ -1,8 +1,19 @@
 #
 # SmartLora.py
 #
-# Load LoRA–style node for model-only LoRA application, up to 5 LoRAs.
+# Dual-model (high / low) LoRA application node, model-only.
 #
+# Maintains two independent, dynamically managed lists of LoRAs:
+#   - "high" LoRAs are applied to the high-noise model.
+#   - "low"  LoRAs are applied to the low-noise model.
+#
+# The whole dynamic UI lives in the frontend (web/smart_lora.js). All of
+# the per-LoRA state (enabled flag, file name, strength) is funnelled into a
+# single hidden STRING widget, ``lora_config``, as JSON so the backend can
+# apply an arbitrary number of LoRAs per group.
+#
+
+import json
 
 import comfy.sd
 import comfy.utils
@@ -10,7 +21,7 @@ import folder_paths
 
 
 class SmartLora:
-    """Like Load LoRA, but model-only with five stacked slots and enable switches."""
+    """Applies two independent lists of model-only LoRAs to a high and a low model."""
 
     def __init__(self):
         self._lora_cache = {}
@@ -21,40 +32,16 @@ class SmartLora:
         if not names:
             names = ["(no loras found)"]
 
-        req = {
-            "model": (
-                "MODEL",
-                {"tooltip": "The diffusion model LoRA weights will be applied to."},
-            ),
-        }
-        for i in range(1, 6):
-            req[f"lora_{i}_enabled"] = (
-                "BOOLEAN",
-                {
-                    "default": i == 1,
-                    "label_on": "On",
-                    "label_off": "Off",
-                    "tooltip": f"Whether slot {i} is applied.",
-                },
-            )
-            req[f"lora_{i}_name"] = (
-                names,
-                {"tooltip": f"LoRA file for slot {i}."},
-            )
-            req[f"lora_{i}_strength_model"] = (
-                "FLOAT",
-                {
-                    "default": 1.0,
-                    "min": -100.0,
-                    "max": 100.0,
-                    "step": 0.01,
-                    "tooltip": "Strength on the diffusion model (can be negative).",
-                },
-            )
-
         return {
-            "required": req,
             "optional": {
+                "model_high": (
+                    "MODEL",
+                    {"tooltip": "High-noise diffusion model the high LoRAs are applied to."},
+                ),
+                "model_low": (
+                    "MODEL",
+                    {"tooltip": "Low-noise diffusion model the low LoRAs are applied to."},
+                ),
                 "prompt": (
                     "STRING",
                     {
@@ -76,13 +63,29 @@ class SmartLora:
                         ),
                     },
                 ),
+                # Exposed only so the frontend can read the available LoRA list
+                # from the node definition. Not used by the backend.
+                "lora_files": (
+                    names,
+                    {"tooltip": "Available LoRA files (used by the node UI)."},
+                ),
+                # Hidden JSON state for the dynamic high/low LoRA lists.
+                "lora_config": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "{}",
+                        "tooltip": "Internal JSON state for the LoRA lists (managed by the UI).",
+                    },
+                ),
             },
         }
 
-    RETURN_TYPES = ("MODEL", "STRING")
-    RETURN_NAMES = ("model", "prompt")
+    RETURN_TYPES = ("MODEL", "MODEL", "STRING")
+    RETURN_NAMES = ("model_high", "model_low", "prompt")
     OUTPUT_TOOLTIPS = (
-        "Model with all enabled LoRAs applied in slot order.",
+        "High model with all enabled high LoRAs applied in order.",
+        "Low model with all enabled low LoRAs applied in order.",
         "Combined prompt: optional prompt input (if any), line break, optional prompt text.",
     )
     FUNCTION = "apply_loras"
@@ -90,10 +93,18 @@ class SmartLora:
     CATEGORY = "slikvik"
     DISPLAY_NAME = "Smart Lora"
     DESCRIPTION = (
-        "Applies up to five LoRAs to the diffusion model in order "
-        "(like chaining model-only Load LoRA nodes)."
+        "Applies two independent lists of model-only LoRAs: high LoRAs to the "
+        "high model and low LoRAs to the low model. Add, remove, toggle and set "
+        "the strength of each LoRA from the node UI."
     )
-    SEARCH_ALIASES = ["lora", "smart lora", "multi lora", "lora stack"]
+    SEARCH_ALIASES = [
+        "lora",
+        "smart lora",
+        "multi lora",
+        "lora stack",
+        "high low lora",
+        "dual lora",
+    ]
 
     def _get_lora(self, lora_name):
         path = folder_paths.get_full_path_or_raise("loras", lora_name)
@@ -108,70 +119,57 @@ class SmartLora:
             return head + "\n" + box
         return box
 
-    def apply_loras(
-        self,
-        model,
-        prompt=None,
-        prompt_text=None,
-        lora_1_enabled=True,
-        lora_1_name=None,
-        lora_1_strength_model=1.0,
-        lora_2_enabled=False,
-        lora_2_name=None,
-        lora_2_strength_model=1.0,
-        lora_3_enabled=False,
-        lora_3_name=None,
-        lora_3_strength_model=1.0,
-        lora_4_enabled=False,
-        lora_4_name=None,
-        lora_4_strength_model=1.0,
-        lora_5_enabled=False,
-        lora_5_name=None,
-        lora_5_strength_model=1.0,
-    ):
-        slots = [
-            (
-                lora_1_enabled,
-                lora_1_name,
-                lora_1_strength_model,
-            ),
-            (
-                lora_2_enabled,
-                lora_2_name,
-                lora_2_strength_model,
-            ),
-            (
-                lora_3_enabled,
-                lora_3_name,
-                lora_3_strength_model,
-            ),
-            (
-                lora_4_enabled,
-                lora_4_name,
-                lora_4_strength_model,
-            ),
-            (
-                lora_5_enabled,
-                lora_5_name,
-                lora_5_strength_model,
-            ),
-        ]
+    def _apply(self, model, entries):
+        if model is None:
+            return None
 
         m = model
-
-        for enabled, name, sm in slots:
-            if not enabled or not name:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("on", True):
                 continue
 
-            sm_eff = float(sm)
+            name = entry.get("name")
+            if not name:
+                continue
+
+            try:
+                sm_eff = float(entry.get("strength", 1.0))
+            except (TypeError, ValueError):
+                continue
             if sm_eff == 0:
                 continue
 
             lora = self._get_lora(name)
             m, _ = comfy.sd.load_lora_for_models(m, None, lora, sm_eff, 0.0)
 
+        return m
+
+    def apply_loras(
+        self,
+        model_high=None,
+        model_low=None,
+        prompt=None,
+        prompt_text=None,
+        lora_files=None,
+        lora_config="{}",
+    ):
+        try:
+            cfg = json.loads(lora_config) if lora_config else {}
+        except (TypeError, ValueError):
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        high_entries = cfg.get("high", []) or []
+        low_entries = cfg.get("low", []) or []
+
+        out_high = self._apply(model_high, high_entries)
+        out_low = self._apply(model_low, low_entries)
         out_prompt = self._merge_prompt(prompt, prompt_text)
-        return (m, out_prompt)
+
+        return (out_high, out_low, out_prompt)
 
 
 NODE_CLASS_MAPPINGS = {
