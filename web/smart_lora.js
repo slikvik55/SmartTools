@@ -135,7 +135,9 @@ function fitNode(node) {
 // ── LoRA name picker (filterable dropdown) ──────────────────────────────────
 function closePicker() {
     if (!_activePicker) return;
+    document.removeEventListener("pointerdown", _activePicker.outside, true);
     document.removeEventListener("mousedown", _activePicker.outside, true);
+    document.removeEventListener("keydown", _activePicker.onKey, true);
     _activePicker.menu.remove();
     _activePicker = null;
 }
@@ -233,8 +235,21 @@ function openLoraPicker(node, row, event) {
     const outside = (e) => {
         if (!menu.contains(e.target)) closePicker();
     };
-    setTimeout(() => document.addEventListener("mousedown", outside, true), 0);
-    _activePicker = { menu, outside };
+    const onKey = (e) => {
+        if (e.key === "Escape") {
+            e.preventDefault();
+            closePicker();
+        }
+    };
+    // The canvas uses pointer events and preventDefault()s pointerdown, which
+    // suppresses the synthetic mousedown; listen for pointerdown (plus mousedown
+    // as a fallback) so clicking anywhere outside the popup closes it.
+    setTimeout(() => {
+        document.addEventListener("pointerdown", outside, true);
+        document.addEventListener("mousedown", outside, true);
+        document.addEventListener("keydown", onKey, true);
+    }, 0);
+    _activePicker = { menu, outside, onKey };
 }
 
 function editStrength(node, row, event) {
