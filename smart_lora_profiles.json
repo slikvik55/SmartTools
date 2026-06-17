@@ -1,0 +1,46 @@
+{
+  "Test1": {
+    "high": [
+      {
+        "on": true,
+        "name": "Wan2.2\\NSFW\\Body\\T2V\\Wan2.2 - T2V - Innie Pussy - HIGH 14B.safetensors",
+        "strength": 1
+      }
+    ],
+    "low": [
+      {
+        "on": true,
+        "name": "Wan2.2\\NSFW\\Body\\T2V\\Wan2.2 - T2V - Innie Pussy - LOW 14B.safetensors",
+        "strength": 1
+      }
+    ],
+    "prompt_text": "test1"
+  },
+  "Test2": {
+    "high": [
+      {
+        "on": true,
+        "name": "Wan2.2\\NSFW\\Cum\\T2V\\Wan2.2 v2 - T2V - Body Shots - HIGH 14B.safetensors",
+        "strength": 0.8
+      },
+      {
+        "on": true,
+        "name": "Wan2.2\\NSFW\\Dicks\\Wan2.2 - I2V - Blowjob - HIGH 14B.safetensors",
+        "strength": 0.7
+      }
+    ],
+    "low": [
+      {
+        "on": true,
+        "name": "Wan2.2\\NSFW\\Cum\\T2V\\Wan2.2 v2 - T2V - Body Shots - LOW 14B.safetensors",
+        "strength": 0.5
+      },
+      {
+        "on": true,
+        "name": "Wan2.2\\NSFW\\Dicks\\Wan2.2 - I2V - Blowjob - LOW 14B.safetensors",
+        "strength": 0.4
+      }
+    ],
+    "prompt_text": "test2"
+  }
+}

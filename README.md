@@ -79,6 +79,8 @@ Applies two **independent** lists of **model-only** LoRAs in one node: **high** 
 
 High LoRAs apply to `model_high` and low LoRAs to `model_low`, in list order, only when their toggle is on and strength is non-zero.
 
+**Profiles:** Above the prompt text box, a **Profile** selector with **Save Profile As...**, **Update Profile**, and **Delete Profile** buttons lets you store and recall setups. A profile captures both LoRA lists (each LoRA's name, strength and enable toggle) plus the prompt text. Selecting a profile loads it (replacing the current lists and prompt text), **Update** overwrites the selected profile with the current state, and **Delete** removes it. Profiles are stored globally on the server in `smart_lora_profiles.json`, so they are shared across every Smart Lora node and all workflows, and persist across restarts.
+
 **Resizing:** Drag the node wider/narrower and the rows reflow horizontally. Drag it taller/shorter and only the `prompt_text` box grows or shrinks; the LoRA rows and buttons stay fixed.
 
 **Persistence:** The full LoRA configuration is stored as JSON on the node (in `node.properties` / the hidden `lora_config` input) and is sent to the backend, so workflows reload exactly as saved.

@@ -201,6 +201,49 @@ async def smart_lora_info(request):
         return web.json_response({"found": False, "error": str(e)})
 
 
+# ─── Saved profiles storage ──────────────────────────────────────────────────
+
+PROFILES_FILE = os.path.join(os.path.dirname(__file__), "smart_lora_profiles.json")
+
+
+def load_profiles():
+    if os.path.exists(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
+
+
+def save_profiles(profiles):
+    with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+        json.dump(profiles, f, indent=2)
+
+
+@PromptServer.instance.routes.get("/smart_tools/smart_lora/profiles")
+async def get_profiles_handler(request):
+    try:
+        return web.json_response(load_profiles())
+    except Exception as e:
+        return web.Response(status=500, text=str(e))
+
+
+@PromptServer.instance.routes.post("/smart_tools/smart_lora/profiles")
+async def save_profiles_handler(request):
+    try:
+        data = await request.json()
+        profiles = data.get("profiles", {})
+        if not isinstance(profiles, dict):
+            profiles = {}
+        save_profiles(profiles)
+        return web.Response(status=200, text="Profiles saved")
+    except Exception as e:
+        return web.Response(status=500, text=str(e))
+
+
 NODE_CLASS_MAPPINGS = {
     "SmartLora": SmartLora,
 }

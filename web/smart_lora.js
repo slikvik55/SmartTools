@@ -26,6 +26,10 @@ const MIN_WIDTH = 320;
 let LORA_FILES = [];
 let _activePicker = null;
 
+// Shared cache of saved profiles: { profileName: { high, low, prompt_text } }.
+let PROFILES = {};
+let _profilesLoaded = false;
+
 // ── small drawing/util helpers ──────────────────────────────────────────────
 function themeColor(key, fallback) {
     return (window.LiteGraph && LiteGraph[key]) || fallback;
@@ -84,7 +88,7 @@ function setOption(w, key, value) {
     w.options[key] = value;
 }
 
-function writeConfig(node) {
+function collectGroups(node) {
     const state = { high: [], low: [] };
     for (const w of node.widgets || []) {
         if (!w.__isLoraRow) continue;
@@ -96,6 +100,11 @@ function writeConfig(node) {
             strength: Number(w.value.strength),
         });
     }
+    return state;
+}
+
+function writeConfig(node) {
+    const state = collectGroups(node);
     const json = JSON.stringify(state);
     node.properties = node.properties || {};
     node.properties.lora_config = json;
@@ -115,6 +124,11 @@ function reorder(node) {
     out.push(...high);
     if (node._addLow) out.push(node._addLow);
     out.push(...low);
+    // Profile controls sit directly above the prompt text box.
+    if (node._profileSelect) out.push(node._profileSelect);
+    if (node._profileSave) out.push(node._profileSave);
+    if (node._profileUpdate) out.push(node._profileUpdate);
+    if (node._profileDelete) out.push(node._profileDelete);
     if (node._promptText) out.push(node._promptText);
     for (const w of node.widgets || []) {
         if (!out.includes(w)) out.push(w);
@@ -464,6 +478,152 @@ function showInfoModal(title, data) {
     document.addEventListener("keydown", onKey, true);
 }
 
+// ── Profiles ────────────────────────────────────────────────────────────────
+const PROFILE_NONE = "(none)";
+
+async function loadProfiles() {
+    try {
+        const res = await api.fetchApi("/smart_tools/smart_lora/profiles");
+        if (res.ok) {
+            const data = await res.json();
+            if (data && typeof data === "object") PROFILES = data;
+        }
+    } catch (e) {
+        /* keep whatever we have */
+    }
+    _profilesLoaded = true;
+    return PROFILES;
+}
+
+async function persistProfiles() {
+    try {
+        await api.fetchApi("/smart_tools/smart_lora/profiles", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ profiles: PROFILES }),
+        });
+    } catch (e) {
+        toast("Failed to save profiles");
+    }
+}
+
+function getState(node) {
+    const groups = collectGroups(node);
+    return {
+        high: groups.high,
+        low: groups.low,
+        prompt_text: node._promptText ? node._promptText.value || "" : "",
+    };
+}
+
+function applyProfile(node, profile) {
+    if (!profile || typeof profile !== "object") return;
+    const cfg = { high: profile.high || [], low: profile.low || [] };
+    node.properties = node.properties || {};
+    node.properties.lora_config = JSON.stringify(cfg);
+    if (node._cfgWidget) node._cfgWidget.value = node.properties.lora_config;
+    rebuildFromConfig(node);
+    if (node._promptText) {
+        node._promptText.value = profile.prompt_text || "";
+        node.properties.prompt_text = node._promptText.value;
+    }
+    writeConfig(node);
+    fitNode(node);
+}
+
+function refreshProfileCombo(node, selectName) {
+    const w = node._profileSelect;
+    if (!w) return;
+    const names = Object.keys(PROFILES).sort((a, b) =>
+        a.toLowerCase().localeCompare(b.toLowerCase())
+    );
+    w.options = w.options || {};
+    w.options.values = [PROFILE_NONE, ...names];
+    if (selectName != null) {
+        w.value = selectName;
+    } else if (!w.options.values.includes(w.value)) {
+        w.value = PROFILE_NONE;
+    }
+    node.setDirtyCanvas(true, true);
+}
+
+function promptForName(defaultValue, callback) {
+    const canvas = app.canvas;
+    if (canvas && typeof canvas.prompt === "function") {
+        canvas.prompt("Profile name", defaultValue || "", (v) => callback(v), null);
+    } else {
+        const v = window.prompt("Profile name", defaultValue || "");
+        if (v != null) callback(v);
+    }
+}
+
+function setupProfileControls(node) {
+    node._profileSelect = node.addWidget(
+        "combo",
+        "Profile",
+        PROFILE_NONE,
+        (value) => {
+            if (value && value !== PROFILE_NONE && PROFILES[value]) {
+                applyProfile(node, PROFILES[value]);
+            }
+        },
+        { values: [PROFILE_NONE] }
+    );
+    node._profileSelect.serialize = false;
+    setOption(node._profileSelect, "serialize", false);
+
+    node._profileSave = node.addWidget("button", "Save Profile As...", null, () => {
+        const current =
+            node._profileSelect.value && node._profileSelect.value !== PROFILE_NONE
+                ? node._profileSelect.value
+                : "";
+        promptForName(current, (rawName) => {
+            const name = (rawName || "").trim();
+            if (!name) return;
+            PROFILES[name] = getState(node);
+            persistProfiles();
+            refreshProfileCombo(node, name);
+            toast(`Profile "${name}" saved`);
+        });
+    });
+    node._profileSave.serialize = false;
+    setOption(node._profileSave, "serialize", false);
+
+    node._profileUpdate = node.addWidget("button", "Update Profile", null, () => {
+        const name = node._profileSelect.value;
+        if (!name || name === PROFILE_NONE) {
+            toast("Select a profile to update");
+            return;
+        }
+        PROFILES[name] = getState(node);
+        persistProfiles();
+        toast(`Profile "${name}" updated`);
+    });
+    node._profileUpdate.serialize = false;
+    setOption(node._profileUpdate, "serialize", false);
+
+    node._profileDelete = node.addWidget("button", "Delete Profile", null, () => {
+        const name = node._profileSelect.value;
+        if (!name || name === PROFILE_NONE) {
+            toast("Select a profile to delete");
+            return;
+        }
+        delete PROFILES[name];
+        persistProfiles();
+        refreshProfileCombo(node, PROFILE_NONE);
+        toast(`Profile "${name}" deleted`);
+    });
+    node._profileDelete.serialize = false;
+    setOption(node._profileDelete, "serialize", false);
+
+    // Populate from the shared cache (fetched once per session).
+    if (_profilesLoaded) {
+        refreshProfileCombo(node);
+    } else {
+        loadProfiles().then(() => refreshProfileCombo(node));
+    }
+}
+
 // ── custom LoRA row widget ──────────────────────────────────────────────────
 function createRowRaw(node, group, entry) {
     node._rowSeq = (node._rowSeq || 0) + 1;
@@ -728,6 +888,9 @@ app.registerExtension({
             node._addLow.serialize = false;
             setOption(node._addLow, "serialize", false);
 
+            // Profile selector + Save/Update/Delete controls (UI-only).
+            setupProfileControls(node);
+
             // prompt_text is a multiline DOM widget; ComfyUI natively gives it
             // the leftover vertical space (only it grows/shrinks on resize),
             // so no custom computeSize is needed here. Overriding it fights the
@@ -763,6 +926,11 @@ app.registerExtension({
                 node._promptText.value = node.properties.prompt_text;
             }
             rebuildFromConfig(node);
+            if (_profilesLoaded) {
+                refreshProfileCombo(node);
+            } else {
+                loadProfiles().then(() => refreshProfileCombo(node));
+            }
         };
     },
 });
