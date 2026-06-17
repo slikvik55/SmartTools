@@ -73,6 +73,7 @@ Applies two **independent** lists of **model-only** LoRAs in one node: **high** 
 
 - a **name** field (click to open a searchable LoRA picker),
 - a **strength** box (click to type a value; negative values allowed),
+- an **info** button (`i`) that, when a sidecar JSON exists next to the LoRA file (same name, `.json` extension), opens a modal showing the **link**, **trigger words**, and **description**, each copyable to the clipboard,
 - an **enable** toggle, and
 - a **delete** button (`✕`).
 

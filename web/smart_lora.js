@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 // Smart Lora: dual-model (high / low) LoRA node with two independent,
 // dynamically managed LoRA lists rendered as custom canvas widgets. All
@@ -279,6 +280,190 @@ function editStrength(node, row, event) {
     );
 }
 
+// ── LoRA info modal ─────────────────────────────────────────────────────────
+function toast(message) {
+    const el = document.createElement("div");
+    el.textContent = message;
+    el.style.cssText = `
+        position: fixed; bottom: 30px; right: 30px; z-index: 100000;
+        background: #1a6b4a; color: #fff; padding: 10px 16px;
+        border-radius: 8px; font-family: sans-serif; font-size: 13px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4); transition: opacity 0.4s ease;
+    `;
+    document.body.appendChild(el);
+    setTimeout(() => {
+        el.style.opacity = "0";
+        setTimeout(() => el.remove(), 400);
+    }, 2200);
+}
+
+function copyText(text, label) {
+    const value = text == null ? "" : String(text);
+    const done = () => toast(`${label} copied`);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(value).then(done).catch(() => fallbackCopy(value, done));
+    } else {
+        fallbackCopy(value, done);
+    }
+}
+
+function fallbackCopy(value, done) {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    ta.style.cssText = "position:fixed;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+        document.execCommand("copy");
+        done?.();
+    } catch (e) {
+        /* ignore */
+    }
+    ta.remove();
+}
+
+async function openLoraInfo(row) {
+    const name = row.value.name;
+    if (!name) {
+        toast("Select a LoRA first");
+        return;
+    }
+    let payload = null;
+    try {
+        const res = await api.fetchApi(
+            `/smart_tools/smart_lora/lora_info?name=${encodeURIComponent(name)}`
+        );
+        if (res.ok) payload = await res.json();
+    } catch (e) {
+        payload = null;
+    }
+    if (!payload || !payload.found) {
+        toast(`No info JSON found for ${baseName(name)}`);
+        return;
+    }
+    showInfoModal(baseName(name), payload.data || {});
+}
+
+function makeCopyButton(label, getText) {
+    const btn = document.createElement("button");
+    btn.textContent = "Copy";
+    btn.style.cssText = `
+        padding: 5px 12px; background: #2a9d8f; color: #fff; border: none;
+        border-radius: 6px; cursor: pointer; font-size: 12px; flex-shrink: 0;
+    `;
+    btn.addEventListener("click", () => copyText(getText(), label));
+    return btn;
+}
+
+function showInfoModal(title, data) {
+    const existing = document.getElementById("smart_lora_info_modal");
+    if (existing) existing.remove();
+
+    const url = data.url || "";
+    const triggerWords = Array.isArray(data.triggerWords)
+        ? data.triggerWords
+        : data.triggerWords
+        ? [String(data.triggerWords)]
+        : [];
+    const triggerText = triggerWords.join(", ");
+    const description = data.description || "";
+    const baseModel = data.baseModel || "";
+
+    const overlay = document.createElement("div");
+    overlay.id = "smart_lora_info_modal";
+    overlay.style.cssText = `
+        position: fixed; inset: 0; z-index: 99999;
+        background: rgba(0,0,0,0.6);
+        display: flex; align-items: center; justify-content: center;
+    `;
+
+    const dialog = document.createElement("div");
+    dialog.style.cssText = `
+        background: #1e2a2a; border: 1px solid #2a9d8f; border-radius: 10px;
+        padding: 18px; width: 560px; max-width: 92vw; max-height: 86vh;
+        display: flex; flex-direction: column; gap: 12px;
+        color: #eee; font-family: sans-serif; box-sizing: border-box;
+    `;
+
+    const header = document.createElement("div");
+    header.style.cssText =
+        "display:flex;align-items:center;justify-content:space-between;gap:10px;";
+    const h = document.createElement("h3");
+    h.textContent = title;
+    h.style.cssText =
+        "margin:0;color:#2a9d8f;font-size:16px;word-break:break-all;";
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "\u2715";
+    closeBtn.style.cssText =
+        "background:none;border:none;color:#aaa;font-size:16px;cursor:pointer;flex-shrink:0;";
+    closeBtn.addEventListener("click", () => overlay.remove());
+    header.appendChild(h);
+    header.appendChild(closeBtn);
+    dialog.appendChild(header);
+
+    if (baseModel) {
+        const bm = document.createElement("div");
+        bm.textContent = `Base model: ${baseModel}`;
+        bm.style.cssText = "font-size:12px;color:#9bbdb6;";
+        dialog.appendChild(bm);
+    }
+
+    const field = (labelText, valueText, opts = {}) => {
+        const wrap = document.createElement("div");
+        wrap.style.cssText = "display:flex;flex-direction:column;gap:5px;";
+
+        const top = document.createElement("div");
+        top.style.cssText =
+            "display:flex;align-items:center;justify-content:space-between;gap:10px;";
+        const lab = document.createElement("span");
+        lab.textContent = labelText;
+        lab.style.cssText = "font-size:12px;color:#9bbdb6;font-weight:bold;";
+        top.appendChild(lab);
+        top.appendChild(makeCopyButton(labelText, () => valueText));
+        wrap.appendChild(top);
+
+        if (opts.link && valueText) {
+            const a = document.createElement("a");
+            a.href = valueText;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
+            a.textContent = valueText;
+            a.style.cssText =
+                "font-size:13px;color:#6cc6ff;word-break:break-all;text-decoration:underline;";
+            wrap.appendChild(a);
+        } else {
+            const box = document.createElement("div");
+            box.textContent = valueText || "(none)";
+            box.style.cssText = `
+                font-size:13px;color:${valueText ? "#ddd" : "#777"};
+                background:#0d1f1f;border:1px solid #2a5d54;border-radius:6px;
+                padding:8px 10px;white-space:pre-wrap;word-break:break-word;
+                ${opts.scroll ? "overflow-y:auto;max-height:34vh;" : ""}
+            `;
+            wrap.appendChild(box);
+        }
+        return wrap;
+    };
+
+    dialog.appendChild(field("Link", url, { link: true }));
+    dialog.appendChild(field("Trigger words", triggerText));
+    dialog.appendChild(field("Description", description, { scroll: true }));
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("pointerdown", (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+    const onKey = (e) => {
+        if (e.key === "Escape") {
+            overlay.remove();
+            document.removeEventListener("keydown", onKey, true);
+        }
+    };
+    document.addEventListener("keydown", onKey, true);
+}
+
 // ── custom LoRA row widget ──────────────────────────────────────────────────
 function createRowRaw(node, group, entry) {
     node._rowSeq = (node._rowSeq || 0) + 1;
@@ -311,15 +496,20 @@ function createRowRaw(node, group, entry) {
             const radius = H * 0.5;
             const delW = H;
             const togW = Math.round(H * 1.7);
+            const infoW = H;
             const strW = 50;
             const right = width - MARGIN;
             const delX = right - delW;
             const togX = delX - GAP - togW;
-            const strX = togX - GAP - strW;
+            const infoX = togX - GAP - infoW;
+            const strX = infoX - GAP - strW;
             const nameX = MARGIN;
             const nameW = Math.max(40, strX - GAP - nameX);
 
-            this._rects = { nameX, nameW, strX, strW, togX, togW, delX, delW, y, H };
+            this._rects = {
+                nameX, nameW, strX, strW, infoX, infoW,
+                togX, togW, delX, delW, y, H,
+            };
 
             ctx.save();
             ctx.textBaseline = "middle";
@@ -357,6 +547,17 @@ function createRowRaw(node, group, entry) {
             ctx.fillText(Number(this.value.strength).toFixed(2), strX + strW * 0.5, midY);
 
             ctx.globalAlpha = 1;
+
+            // Info button ("i")
+            ctx.fillStyle = bg;
+            roundRect(ctx, infoX, y, infoW, H, 4);
+            ctx.fill();
+            ctx.strokeStyle = outline;
+            ctx.stroke();
+            ctx.fillStyle = textCol;
+            ctx.font = "bold italic 13px Georgia, 'Times New Roman', serif";
+            ctx.textAlign = "center";
+            ctx.fillText("i", infoX + infoW * 0.5, midY + 0.5);
 
             // Enable toggle (boolean pill)
             ctx.fillStyle = bg;
@@ -408,6 +609,10 @@ function createRowRaw(node, group, entry) {
             }
             if (inX(r.delX, r.delW)) {
                 deleteRow(n, this);
+                return true;
+            }
+            if (inX(r.infoX, r.infoW)) {
+                openLoraInfo(this);
                 return true;
             }
             if (inX(r.strX, r.strW)) {

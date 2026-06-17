@@ -14,10 +14,13 @@
 #
 
 import json
+import os
 
 import comfy.sd
 import comfy.utils
 import folder_paths
+from aiohttp import web
+from server import PromptServer
 
 
 class SmartLora:
@@ -170,6 +173,32 @@ class SmartLora:
         out_prompt = self._merge_prompt(prompt, prompt_text)
 
         return (out_high, out_low, out_prompt)
+
+
+@PromptServer.instance.routes.get("/smart_tools/smart_lora/lora_info")
+async def smart_lora_info(request):
+    """Return the sidecar JSON for a LoRA (same path, `.json` extension)."""
+    name = request.query.get("name", "")
+    if not name:
+        return web.json_response({"found": False})
+
+    try:
+        path = folder_paths.get_full_path("loras", name)
+    except Exception:
+        path = None
+    if not path:
+        return web.json_response({"found": False})
+
+    json_path = os.path.splitext(path)[0] + ".json"
+    if not os.path.isfile(json_path):
+        return web.json_response({"found": False})
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return web.json_response({"found": True, "data": data})
+    except Exception as e:
+        return web.json_response({"found": False, "error": str(e)})
 
 
 NODE_CLASS_MAPPINGS = {
