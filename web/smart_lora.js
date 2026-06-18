@@ -22,6 +22,7 @@ const ROW_H = (window.LiteGraph && LiteGraph.NODE_WIDGET_HEIGHT) || 20;
 const MARGIN = 15;
 const GAP = 6;
 const MIN_WIDTH = 320;
+const SEP_H = 9;
 
 let LORA_FILES = [];
 let _activePicker = null;
@@ -122,18 +123,49 @@ function reorder(node) {
     const out = [];
     if (node._addHigh) out.push(node._addHigh);
     out.push(...high);
+    // Divider between the high and low LoRA sections.
+    if (node._sepHighLow) out.push(node._sepHighLow);
     if (node._addLow) out.push(node._addLow);
     out.push(...low);
+    // Divider between the low LoRA section and the profiles section.
+    if (node._sepLowProfiles) out.push(node._sepLowProfiles);
     // Profile controls sit directly above the prompt text box.
     if (node._profileSelect) out.push(node._profileSelect);
     if (node._profileSave) out.push(node._profileSave);
     if (node._profileUpdate) out.push(node._profileUpdate);
     if (node._profileDelete) out.push(node._profileDelete);
+    // Divider between the profiles section and the prompt text.
+    if (node._sepProfilesPrompt) out.push(node._sepProfilesPrompt);
     if (node._promptText) out.push(node._promptText);
     for (const w of node.widgets || []) {
         if (!out.includes(w)) out.push(w);
     }
     node.widgets = out;
+}
+
+function makeSeparator() {
+    return {
+        name: "__sep",
+        type: "smartlora_sep",
+        __isSeparator: true,
+        serialize: false,
+        options: { serialize: false },
+        computeSize(width) {
+            return [width || MIN_WIDTH, SEP_H];
+        },
+        draw(ctx, n, width, y, H) {
+            const cy = Math.round(y + H * 0.5) + 0.5;
+            ctx.save();
+            ctx.strokeStyle = themeColor("WIDGET_OUTLINE_COLOR", "#666");
+            ctx.globalAlpha = 0.6;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(MARGIN, cy);
+            ctx.lineTo(width - MARGIN, cy);
+            ctx.stroke();
+            ctx.restore();
+        },
+    };
 }
 
 function fitNode(node) {
@@ -890,6 +922,16 @@ app.registerExtension({
 
             // Profile selector + Save/Update/Delete controls (UI-only).
             setupProfileControls(node);
+
+            // Dividers separating high / low / profiles / prompt sections.
+            node._sepHighLow = makeSeparator();
+            node._sepLowProfiles = makeSeparator();
+            node._sepProfilesPrompt = makeSeparator();
+            node.widgets.push(
+                node._sepHighLow,
+                node._sepLowProfiles,
+                node._sepProfilesPrompt
+            );
 
             // prompt_text is a multiline DOM widget; ComfyUI natively gives it
             // the leftover vertical space (only it grows/shrinks on resize),
