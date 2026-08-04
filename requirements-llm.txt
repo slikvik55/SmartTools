@@ -1,5 +1,0 @@
-# Optional: Smart LLM (Gemma 4 via Hugging Face). Install into ComfyUI's Python env, e.g.
-#   path\to\python_embeded\python.exe -m pip install -r requirements-llm.txt
-transformers>=5.5.0
-safetensors>=0.4.0
-accelerate>=0.33.0

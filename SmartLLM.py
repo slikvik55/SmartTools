@@ -1,7 +1,8 @@
 #
 # SmartLLM.py
 #
-# Local Gemma 4 (Hugging Face snapshot: safetensors + config) via Transformers.
+# Local HF vision-language models (AutoProcessor + AutoModelForImageTextToText)
+# from a safetensors snapshot folder. Qwen3-VL and Gemma 4 are supported paths.
 #
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ import torch
 logger = logging.getLogger(__name__)
 
 _CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+
+# Soft cap when max_video_frames=0 (use-all). Full VHS batches at 30fps easily
+# hang/OOM Qwen3-VL with no Comfy progress updates.
+_SAFE_MAX_VIDEO_FRAMES = 64
 
 
 def _require_transformers():
@@ -61,6 +66,119 @@ def _comfy_image_to_pil(image: torch.Tensor) -> Any:
     frame = image[0].detach().cpu().clamp(0.0, 1.0).numpy()
     rgb = (frame * 255.0).round().astype(np.uint8)
     return Image.fromarray(rgb, mode="RGB")
+
+
+def _frame_tensor_to_pil(frame: torch.Tensor) -> Any:
+    from PIL import Image
+
+    arr = frame.detach().cpu().clamp(0.0, 1.0).numpy()
+    rgb = (arr * 255.0).round().astype(np.uint8)
+    if rgb.ndim == 2:
+        return Image.fromarray(rgb, mode="L").convert("RGB")
+    if rgb.shape[-1] == 4:
+        return Image.fromarray(rgb, mode="RGBA").convert("RGB")
+    return Image.fromarray(rgb, mode="RGB")
+
+
+def _even_frame_indices(n: int, max_frames: int) -> list[int]:
+    if max_frames <= 0 or n <= max_frames:
+        return list(range(n))
+    if max_frames == 1:
+        return [n // 2]
+    return [int(round(i * (n - 1) / (max_frames - 1))) for i in range(max_frames)]
+
+
+def _resolve_video_frame_budget(total_frames: int, max_video_frames: int) -> int:
+    """Return effective max frames to keep (always >= 1 when total_frames >= 1)."""
+    n = int(total_frames)
+    req = int(max_video_frames)
+    if req > 0:
+        return min(n, req)
+    if n > _SAFE_MAX_VIDEO_FRAMES:
+        logger.warning(
+            "SmartLLM: video has %d frames and max_video_frames=0 (use all). "
+            "Capping to %d evenly spaced frames to avoid long hangs / VRAM blowups. "
+            "Raise max_video_frames explicitly if you really want more (also limit upstream "
+            "with VHS frame_load_cap).",
+            n,
+            _SAFE_MAX_VIDEO_FRAMES,
+        )
+        return _SAFE_MAX_VIDEO_FRAMES
+    return n
+
+
+def _comfy_batch_to_pils(image: torch.Tensor, max_frames: int = 0) -> list[Any]:
+    """Convert IMAGE batch to PIL frames, subsampling tensor indices first when capped."""
+    if image.ndim != 4:
+        raise ValueError(f"SmartLLM: expected IMAGE batch (B,H,W,C), got shape {tuple(image.shape)}")
+    n = int(image.shape[0])
+    if n < 1:
+        raise ValueError("SmartLLM: video IMAGE batch is empty.")
+    budget = _resolve_video_frame_budget(n, max_frames)
+    idxs = _even_frame_indices(n, budget)
+    _throw_if_interrupted()
+    pils: list[Any] = []
+    for i in idxs:
+        pils.append(_frame_tensor_to_pil(image[i]))
+        if len(pils) % 16 == 0:
+            _throw_if_interrupted()
+    if budget < n:
+        logger.info("SmartLLM: using %d / %d video frames (even subsample).", budget, n)
+    else:
+        logger.info("SmartLLM: using all %d video frames.", n)
+    return pils
+
+
+def _throw_if_interrupted() -> None:
+    try:
+        import comfy.model_management as model_management
+
+        model_management.throw_exception_if_processing_interrupted()
+    except ImportError:
+        pass
+
+
+def _generation_stopping_criteria() -> list[Any] | None:
+    """Stop HF generate() when ComfyUI cancel is requested."""
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except ImportError:
+        return None
+
+    class _ComfyInterruptCriteria(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):  # noqa: ARG002
+            try:
+                import comfy.model_management as model_management
+
+                return bool(model_management.processing_interrupted())
+            except Exception:
+                return False
+
+    return StoppingCriteriaList([_ComfyInterruptCriteria()])
+
+
+def _build_video_metadata(pil_video: list[Any], fps: float) -> Any:
+    """Metadata for pre-sampled Comfy/VHS frames so Qwen3-VL/Gemma can build timestamps."""
+    n = len(pil_video)
+    fps_f = float(fps) if fps and fps > 0 else 30.0
+    width = height = None
+    if n and hasattr(pil_video[0], "size"):
+        width, height = pil_video[0].size
+    meta = {
+        "total_num_frames": n,
+        "fps": fps_f,
+        "duration": float(n) / fps_f,
+        "frames_indices": list(range(n)),
+        "width": width,
+        "height": height,
+        "video_backend": "smartllm_presampled",
+    }
+    try:
+        from transformers.video_utils import VideoMetadata
+
+        return VideoMetadata(**meta)
+    except Exception:
+        return meta
 
 
 def _pick_dtype():
@@ -322,8 +440,10 @@ def _prepare_processor_inputs(
     system_prompt: str,
     user_prompt: str,
     pil_images: list[Any],
+    pil_video: list[Any] | None = None,
+    video_fps: float = 30.0,
 ) -> Any:
-    """HF multimodal pattern: render chat as text, pass PIL images into the processor."""
+    """HF multimodal pattern: render chat as text, pass PIL images/videos into the processor."""
     messages: list[dict[str, Any]] = []
     sys_stripped = (system_prompt or "").strip()
     if sys_stripped:
@@ -336,6 +456,17 @@ def _prepare_processor_inputs(
     user_content: list[dict[str, Any]] = []
     for pil in pil_images:
         user_content.append({"type": "image", "image": pil})
+    if pil_video:
+        fps = float(video_fps) if video_fps and video_fps > 0 else 30.0
+        # fps / sample_fps: temporal metadata for pre-sampled frame lists (Qwen3-VL / Gemma 4).
+        user_content.append(
+            {
+                "type": "video",
+                "video": pil_video,
+                "fps": fps,
+                "sample_fps": fps,
+            }
+        )
     user_content.append({"type": "text", "text": user_prompt or ""})
     messages.append({"role": "user", "content": user_content})
 
@@ -347,11 +478,48 @@ def _prepare_processor_inputs(
     proc_kw: dict[str, Any] = {"text": chat_str, "return_tensors": "pt"}
     if pil_images:
         proc_kw["images"] = pil_images
-    return processor(**proc_kw)
+    if pil_video:
+        fps = float(video_fps) if video_fps and video_fps > 0 else 30.0
+        metadata = _build_video_metadata(pil_video, fps)
+        proc_kw["videos"] = [pil_video]
+        # Qwen3-VL reads fps from video_metadata for timestamp prompts; videos_kwargs
+        # alone is not enough for pre-sampled frame lists (defaults to 24 with a warning).
+        proc_kw["video_metadata"] = [metadata]
+        proc_kw["videos_kwargs"] = {
+            "fps": fps,
+            "do_sample_frames": False,
+        }
+
+    try:
+        return processor(**proc_kw)
+    except TypeError as e:
+        msg = str(e).lower()
+        if pil_video and "video_metadata" in msg:
+            # Older processors: drop top-level video_metadata, keep videos_kwargs entry.
+            proc_kw.pop("video_metadata", None)
+            try:
+                return processor(**proc_kw)
+            except TypeError:
+                pass
+        if pil_video and ("videos" in msg or "unexpected keyword" in msg):
+            raise RuntimeError(
+                "SmartLLM: this model's processor rejected video inputs (`videos=`). "
+                "Use a vision-language checkpoint with video support (e.g. Qwen3-VL or Gemma 4), "
+                "or disconnect the `video` input."
+            ) from e
+        raise
+    except Exception as e:
+        if pil_video:
+            raise RuntimeError(
+                "SmartLLM: failed to process video frames with this processor. "
+                "Ensure the checkpoint supports video (e.g. Qwen3-VL / Gemma 4) and that "
+                f"frame count / resolution fit VRAM. Underlying error: {type(e).__name__}: {e}"
+            ) from e
+        raise
 
 
 class SmartLLM:
-    """Run Gemma 4 from a local Hugging Face model directory (safetensors layout)."""
+    """Run a local HF VL model (AutoProcessor) from a safetensors snapshot folder."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -410,6 +578,34 @@ class SmartLLM:
                         "tooltip": "When ON, remove the model from VRAM after this node finishes.",
                     },
                 ),
+                "video_fps": (
+                    "FLOAT",
+                    {
+                        "default": 30.0,
+                        "min": 0.1,
+                        "max": 120.0,
+                        "step": 0.1,
+                        "tooltip": (
+                            "Frame rate of the `video` IMAGE batch (match VHS force_rate / loaded fps). "
+                            "Used for temporal grounding; ignored when video is disconnected."
+                        ),
+                    },
+                ),
+                "max_video_frames": (
+                    "INT",
+                    {
+                        "default": 32,
+                        "min": 0,
+                        "max": 4096,
+                        "step": 1,
+                        "tooltip": (
+                            "Max frames from `video` (evenly spaced). "
+                            "0 = use all frames, but batches larger than "
+                            f"{_SAFE_MAX_VIDEO_FRAMES} are auto-capped for safety. "
+                            "Use VHS frame_load_cap for long clips. Ignored when video is disconnected."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "image": (
@@ -419,6 +615,16 @@ class SmartLLM:
                 "image_2": (
                     "IMAGE",
                     {"tooltip": "Optional. Second image (batch index 0), after `image` in the prompt."},
+                ),
+                "video": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "Optional. Video as an IMAGE frame batch (e.g. VideoHelperSuite Load Video "
+                            "IMAGE output). Keep max_video_frames modest (default 32); full clips at "
+                            "30fps are very slow and hard to cancel mid-generate."
+                        ),
+                    },
                 ),
             },
         }
@@ -430,8 +636,9 @@ class SmartLLM:
     CATEGORY = "slikvik/LLM"
     DISPLAY_NAME = "Smart LLM"
     DESCRIPTION = (
-        "Gemma 4 via Hugging Face Transformers from a local snapshot folder (safetensors). "
-        "Optional `image` / `image_2` enable multimodal (vision) mode."
+        "Local HF vision-language model via Transformers (AutoProcessor + "
+        "AutoModelForImageTextToText) from a safetensors snapshot. "
+        "Optional `image` / `image_2` / `video` (IMAGE frame batch) enable multimodal mode."
     )
 
     @classmethod
@@ -443,8 +650,11 @@ class SmartLLM:
         max_tokens: int,
         attn_implementation: str,
         unload_model: bool,
+        video_fps: float = 30.0,
+        max_video_frames: int = 32,
         image: torch.Tensor | None = None,
         image_2: torch.Tensor | None = None,
+        video: torch.Tensor | None = None,
     ):
         return (
             model_folder,
@@ -453,8 +663,11 @@ class SmartLLM:
             max_tokens,
             attn_implementation,
             unload_model,
+            float(video_fps),
+            int(max_video_frames),
             _image_tensor_cache_key(image),
             _image_tensor_cache_key(image_2),
+            _image_tensor_cache_key(video),
         )
 
     def run(
@@ -465,12 +678,17 @@ class SmartLLM:
         max_tokens: int,
         attn_implementation: str,
         unload_model: bool,
+        video_fps: float = 30.0,
+        max_video_frames: int = 32,
         image: torch.Tensor | None = None,
         image_2: torch.Tensor | None = None,
+        video: torch.Tensor | None = None,
     ):
         resolved = _validate_model_folder(model_folder)
         attn_norm = _normalize_attn(attn_implementation)
         cache_key = (resolved, attn_norm)
+
+        _throw_if_interrupted()
 
         pil_images: list[Any] = []
         if image is not None:
@@ -478,17 +696,49 @@ class SmartLLM:
         if image_2 is not None:
             pil_images.append(_comfy_image_to_pil(image_2))
 
+        pil_video: list[Any] | None = None
+        if video is not None:
+            if video.ndim == 4:
+                logger.info(
+                    "SmartLLM: video batch shape=%s (frames=%d). Preparing frames…",
+                    tuple(video.shape),
+                    int(video.shape[0]),
+                )
+            pil_video = _comfy_batch_to_pils(video, int(max_video_frames))
+
+        _throw_if_interrupted()
         model, processor = _load_model(resolved, attn_norm)
 
-        inputs = _prepare_processor_inputs(processor, system_prompt, prompt, pil_images)
+        _throw_if_interrupted()
+        logger.info("SmartLLM: running processor (images=%d, video_frames=%d)…", len(pil_images), len(pil_video or []))
+        inputs = _prepare_processor_inputs(
+            processor,
+            system_prompt,
+            prompt,
+            pil_images,
+            pil_video=pil_video,
+            video_fps=float(video_fps),
+        )
         device = next(model.parameters()).device
         inputs = _move_batch_to_device(inputs, device)
 
         input_len = int(inputs["input_ids"].shape[1])
+        logger.info(
+            "SmartLLM: generating (input_tokens=%d, max_new_tokens=%d)…",
+            input_len,
+            int(max_tokens),
+        )
 
         gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": int(max_tokens)}
+        stop = _generation_stopping_criteria()
+        if stop is not None:
+            gen_kw["stopping_criteria"] = stop
+
+        _throw_if_interrupted()
         with torch.inference_mode():
             out_ids = model.generate(**gen_kw)
+
+        _throw_if_interrupted()
 
         new_tokens = out_ids[0, input_len:]
         ids_list = new_tokens.detach().cpu().tolist()
