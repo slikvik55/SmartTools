@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -435,6 +436,58 @@ def _image_tensor_cache_key(image: torch.Tensor | None) -> Any:
     return (tuple(t.shape), float(t.sum()), float(t.abs().sum()))
 
 
+def _audio_cache_key(audio: dict[str, Any] | None) -> Any:
+    if audio is None:
+        return None
+    waveform = audio.get("waveform") if isinstance(audio, dict) else None
+    sample_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+    if not torch.is_tensor(waveform):
+        return ("invalid", sample_rate)
+    try:
+        rate_key: Any = int(sample_rate)
+    except (TypeError, ValueError):
+        rate_key = repr(sample_rate)
+    t = waveform.detach().cpu()
+    return (tuple(t.shape), rate_key, float(t.sum()), float(t.abs().sum()))
+
+
+def _prepare_comfy_audio(
+    audio: dict[str, Any] | None,
+    target_sample_rate: int = 16000,
+) -> tuple[torch.Tensor | None, float | None]:
+    """Validate VHS/ComfyUI AUDIO and return mono [1,T] float32 audio plus source duration."""
+    if audio is None:
+        return None, None
+    if not isinstance(audio, dict):
+        raise ValueError("SmartLLM: AUDIO must be a dictionary with `waveform` and `sample_rate`.")
+    waveform = audio.get("waveform")
+    sample_rate = audio.get("sample_rate")
+    if not torch.is_tensor(waveform) or waveform.ndim != 3:
+        raise ValueError("SmartLLM: AUDIO `waveform` must be a tensor shaped [B,C,T].")
+    if any(int(size) < 1 for size in waveform.shape):
+        raise ValueError("SmartLLM: AUDIO waveform cannot be empty.")
+    try:
+        source_rate = int(sample_rate)
+    except (TypeError, ValueError) as e:
+        raise ValueError("SmartLLM: AUDIO `sample_rate` must be a positive integer.") from e
+    if source_rate <= 0:
+        raise ValueError("SmartLLM: AUDIO `sample_rate` must be a positive integer.")
+
+    source_duration = float(waveform.shape[-1]) / float(source_rate)
+    mono = waveform[0].detach().to(device="cpu", dtype=torch.float32).mean(dim=0, keepdim=True)
+    mono = torch.nan_to_num(mono).clamp(-1.0, 1.0)
+    target_rate = int(target_sample_rate)
+    if source_rate != target_rate:
+        target_samples = max(1, int(round(mono.shape[-1] * target_rate / source_rate)))
+        mono = F.interpolate(
+            mono.unsqueeze(0),
+            size=target_samples,
+            mode="linear",
+            align_corners=False,
+        ).squeeze(0)
+    return mono.contiguous(), source_duration
+
+
 def _prepare_processor_inputs(
     processor: Any,
     system_prompt: str,
@@ -442,6 +495,7 @@ def _prepare_processor_inputs(
     pil_images: list[Any],
     pil_video: list[Any] | None = None,
     video_fps: float = 30.0,
+    audio_waveform: torch.Tensor | None = None,
 ) -> Any:
     """HF multimodal pattern: render chat as text, pass PIL images/videos into the processor."""
     messages: list[dict[str, Any]] = []
@@ -467,6 +521,8 @@ def _prepare_processor_inputs(
                 "sample_fps": fps,
             }
         )
+    if audio_waveform is not None:
+        user_content.append({"type": "audio", "audio": audio_waveform})
     user_content.append({"type": "text", "text": user_prompt or ""})
     messages.append({"role": "user", "content": user_content})
 
@@ -489,6 +545,8 @@ def _prepare_processor_inputs(
             "fps": fps,
             "do_sample_frames": False,
         }
+    if audio_waveform is not None:
+        proc_kw["audio"] = audio_waveform
 
     try:
         return processor(**proc_kw)
@@ -501,6 +559,11 @@ def _prepare_processor_inputs(
                 return processor(**proc_kw)
             except TypeError:
                 pass
+        if audio_waveform is not None and ("audio" in msg or "unexpected keyword" in msg):
+            raise RuntimeError(
+                "SmartLLM: this model's processor rejected audio input. Use an audio-capable "
+                "checkpoint (for example Gemma 4 E2B, E4B, or 12B), or disconnect audio."
+            ) from e
         if pil_video and ("videos" in msg or "unexpected keyword" in msg):
             raise RuntimeError(
                 "SmartLLM: this model's processor rejected video inputs (`videos=`). "
@@ -509,13 +572,58 @@ def _prepare_processor_inputs(
             ) from e
         raise
     except Exception as e:
-        if pil_video:
+        if pil_video or audio_waveform is not None:
             raise RuntimeError(
-                "SmartLLM: failed to process video frames with this processor. "
-                "Ensure the checkpoint supports video (e.g. Qwen3-VL / Gemma 4) and that "
-                f"frame count / resolution fit VRAM. Underlying error: {type(e).__name__}: {e}"
+                "SmartLLM: failed to process connected multimodal inputs. Ensure the checkpoint "
+                "supports every connected modality and that media size fits memory. "
+                f"Underlying error: {type(e).__name__}: {e}"
             ) from e
         raise
+
+
+def _generate_text(
+    model: Any,
+    processor: Any,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    pil_images: list[Any] | None = None,
+    pil_video: list[Any] | None = None,
+    video_fps: float = 30.0,
+    audio_waveform: torch.Tensor | None = None,
+) -> str:
+    """Run one shared local multimodal generation pass and decode only new tokens."""
+    _throw_if_interrupted()
+    inputs = _prepare_processor_inputs(
+        processor,
+        system_prompt,
+        user_prompt,
+        pil_images or [],
+        pil_video=pil_video,
+        video_fps=float(video_fps),
+        audio_waveform=audio_waveform,
+    )
+    device = next(model.parameters()).device
+    inputs = _move_batch_to_device(inputs, device)
+    input_len = int(inputs["input_ids"].shape[1])
+    logger.info(
+        "SmartLLM: generating (input_tokens=%d, max_new_tokens=%d)…",
+        input_len,
+        int(max_tokens),
+    )
+    gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": int(max_tokens)}
+    stop = _generation_stopping_criteria()
+    if stop is not None:
+        gen_kw["stopping_criteria"] = stop
+    _throw_if_interrupted()
+    with torch.inference_mode():
+        out_ids = model.generate(**gen_kw)
+    _throw_if_interrupted()
+    ids_list = out_ids[0, input_len:].detach().cpu().tolist()
+    tok = getattr(processor, "tokenizer", None)
+    if tok is None:
+        raise RuntimeError("SmartLLM: processor has no tokenizer attribute.")
+    return tok.decode(ids_list, skip_special_tokens=True)
 
 
 class SmartLLM:
@@ -711,46 +819,16 @@ class SmartLLM:
 
         _throw_if_interrupted()
         logger.info("SmartLLM: running processor (images=%d, video_frames=%d)…", len(pil_images), len(pil_video or []))
-        inputs = _prepare_processor_inputs(
+        text = _generate_text(
+            model,
             processor,
-            system_prompt,
-            prompt,
-            pil_images,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            max_tokens=int(max_tokens),
+            pil_images=pil_images,
             pil_video=pil_video,
             video_fps=float(video_fps),
         )
-        device = next(model.parameters()).device
-        inputs = _move_batch_to_device(inputs, device)
-
-        input_len = int(inputs["input_ids"].shape[1])
-        logger.info(
-            "SmartLLM: generating (input_tokens=%d, max_new_tokens=%d)…",
-            input_len,
-            int(max_tokens),
-        )
-
-        gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": int(max_tokens)}
-        stop = _generation_stopping_criteria()
-        if stop is not None:
-            gen_kw["stopping_criteria"] = stop
-
-        _throw_if_interrupted()
-        with torch.inference_mode():
-            out_ids = model.generate(**gen_kw)
-
-        _throw_if_interrupted()
-
-        new_tokens = out_ids[0, input_len:]
-        ids_list = new_tokens.detach().cpu().tolist()
-        del inputs
-        del gen_kw
-        del new_tokens
-        del out_ids
-
-        tok = getattr(processor, "tokenizer", None)
-        if tok is None:
-            raise RuntimeError("SmartLLM: processor has no tokenizer attribute.")
-        text = tok.decode(ids_list, skip_special_tokens=True)
 
         if unload_model:
             _free_cache_entry(cache_key)

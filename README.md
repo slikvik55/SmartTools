@@ -119,6 +119,44 @@ Works with any checkpoint those Auto classes load — for example **Qwen3-VL** (
 
 **Transformers version:** See [`requirements.txt`](requirements.txt). Gemma 4 needs **`transformers` 5.5.0 or newer**; Qwen3-VL needs a Transformers build that registers its processor/model classes.
 
+### Smart H3 Prompt
+
+**Display name:** Smart H3 Prompt
+
+**Category:** `slikvik/LLM`
+
+Uses the same local Hugging Face model cache as Smart LLM to analyze references and produce a duration-aware prompt that follows the bundled [MiniMax H3 prompt-writing guides](h3_references/). It runs a factual media-analysis pass, generates the H3 prompt, validates its structure and timing, and makes one text-only repair attempt if needed.
+
+| Input | Notes |
+|--------|-------|
+| `skill` | **base** for T2VA/I2VA/FL2VA/L2VA, or **ref2VA** for full-reference six-section output. |
+| `base_workflow` | Explicit base workflow. Ignored by ref2VA. |
+| `prompt` | Creative intent and desired use of references. The base workflow does not need to be repeated here. |
+| `verbatim_dialogue` | Optional dialogue/lyrics to preserve exactly inside H3 `<d>` blocks. |
+| `video_duration` | Exact target duration in seconds (default **15.00**); controls final-frame alignment and valid cut range. |
+| `visual_style` | **Auto** or a specific H3-compatible visual style hint. |
+| `shot_count` | **0** lets the model choose; a positive value is validated as an exact shot count. |
+| `audio_usage` | Infer from prompt, copy/reuse, reference only, or ignore connected audio. |
+| `max_tokens` | Generation budget, default **4096** to accommodate detailed ref2VA output. |
+| `image_1`…`image_4` | Optional still references. Base workflows use only their prescribed sockets; ref2VA numbers connected images densely. |
+| `video` | Optional VHS-style `IMAGE` frame batch, with `video_fps` and `max_video_frames` matching Smart LLM. |
+| `audio` | Optional standard `AUDIO` dictionary, directly connectable from VideoHelperSuite **Load Audio**. |
+
+Base image mapping:
+
+- **T2VA:** text-driven; connected still images are not used or labeled.
+- **I2VA:** requires `image_1`, mapped to `<Picture 1>` at 0.00 seconds.
+- **FL2VA:** requires `image_1` as Picture 1 at 0.00 and `image_2` as Picture 2 at the exact final duration.
+- **L2VA:** requires `image_1`, mapped to `<Picture 1>` at the exact final duration.
+
+ref2VA uses all connected images in socket order, skipping gaps, then exposes the video and audio as `<Video 1>` and `<Audio 1>` when active. Reusable people, objects, scenes, styles, or actions are defined separately as `<Subject N>` by the model.
+
+The audio socket accepts `{"waveform": Tensor[B,C,T], "sample_rate": int}`, the same payload returned by VideoHelperSuite `LoadAudio`. Audio is mixed to mono and resampled to 16 kHz for inference. The selected checkpoint must support every connected modality; Gemma 4 E2B, E4B, and 12B variants support native audio, while many vision-language checkpoints do not. If source-audio and target-video durations differ, the prompt is instructed to describe partial reuse, trimming, continuation, or padding rather than claiming impossible 1:1 reuse.
+
+**Outputs:** `h3_prompt` is a clean paste-ready H3 prompt with no analysis or markdown wrapper. `analysis` contains the model's factual notes about the connected references and can be left unconnected.
+
+Because this node normally performs two model generations (analysis and prompt writing), and a third only when repair is required, it takes longer than a single Smart LLM call. The model remains loaded between passes and follows the `unload_model` setting after completion.
+
 ## Author
 
 slivik (Smart Resizer header: v1.0.0 initial release).
