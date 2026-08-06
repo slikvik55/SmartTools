@@ -125,7 +125,7 @@ Works with any checkpoint those Auto classes load — for example **Qwen3-VL** (
 
 **Category:** `slikvik/LLM`
 
-Uses the same local Hugging Face model cache as Smart LLM to analyze references and produce a duration-aware prompt that follows the bundled [MiniMax H3 prompt-writing guides](h3_references/). It runs a factual media-analysis pass, generates the H3 prompt, validates its structure and timing, and makes one text-only repair attempt if needed.
+Uses the same local Hugging Face model cache as Smart LLM to analyze references and produce a duration-aware prompt that follows the bundled [MiniMax H3 prompt-writing guides](h3_references/). It runs a factual media-analysis pass, generates the H3 prompt deterministically, validates its structure and timing, and makes up to two text-only repair attempts if needed.
 
 | Input | Notes |
 |--------|-------|
@@ -159,7 +159,7 @@ The audio socket accepts `{"waveform": Tensor[B,C,T], "sample_rate": int}`, the 
 
 **Outputs:** `h3_prompt` is a clean paste-ready H3 prompt with no analysis or markdown wrapper. `analysis` contains the model's factual notes about the connected references and can be left unconnected.
 
-Because this node normally performs two model generations (analysis and prompt writing), and a third only when repair is required, it takes longer than a single Smart LLM call. The model remains loaded between passes and follows the `unload_model` setting after completion.
+Because this node normally performs two model generations (analysis and prompt writing), with up to two additional generations when repair is required, it takes longer than a single Smart LLM call. The model remains loaded between passes and follows the `unload_model` setting after completion.
 
 ## Author
 

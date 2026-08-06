@@ -591,6 +591,7 @@ def _generate_text(
     pil_video: list[Any] | None = None,
     video_fps: float = 30.0,
     audio_waveform: torch.Tensor | None = None,
+    do_sample: bool | None = None,
 ) -> str:
     """Run one shared local multimodal generation pass and decode only new tokens."""
     _throw_if_interrupted()
@@ -612,6 +613,8 @@ def _generate_text(
         int(max_tokens),
     )
     gen_kw: dict[str, Any] = {**inputs, "max_new_tokens": int(max_tokens)}
+    if do_sample is not None:
+        gen_kw["do_sample"] = bool(do_sample)
     stop = _generation_stopping_criteria()
     if stop is not None:
         gen_kw["stopping_criteria"] = stop

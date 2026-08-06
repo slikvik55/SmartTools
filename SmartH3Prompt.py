@@ -382,6 +382,82 @@ def _description_body(text: str, skill: str) -> str:
     return text[start:end] if start >= 0 and end > start else ""
 
 
+def _shot_headers(body: str) -> tuple[list[int], list[tuple[int, float]]]:
+    """Return actual shot headers, ignoring bracketed shot references inside prose."""
+    first_position = body.find("[Shot 1]")
+    if first_position < 0:
+        return [], []
+    cuts = [
+        (int(shot), int(minutes) * 60 + float(seconds))
+        for shot, minutes, seconds in re.findall(
+            r"\[Shot\s+(\d+)\]\s+At\s+(\d{2}):(\d{2}\.\d{3})",
+            body,
+        )
+    ]
+    headers = [1, *(shot for shot, _ in cuts)]
+    for shot in re.findall(r"(?:^|\n)\[Shot\s+(\d+)\](?!\s+At\b)", body):
+        number = int(shot)
+        if number != 1 and number not in headers:
+            headers.append(number)
+    return headers, cuts
+
+
+def _ensure_picture_role_definitions(
+    text: str,
+    expected_picture_roles: list[str],
+    shot_count: int,
+) -> str:
+    """Add/clarify concrete Picture-role definitions without inventing visual details."""
+    if not expected_picture_roles or "subject_definitions:" not in text or "summary:" not in text:
+        return text
+    definitions_end = text.find("summary:")
+    definitions = text[:definitions_end].rstrip()
+    remainder = text[definitions_end:].lstrip()
+    body = _description_body(text, "ref2VA")
+    headers, _ = _shot_headers(body)
+    final_shot = int(shot_count) if int(shot_count) > 0 else (max(headers) if headers else 1)
+    clauses = {
+        "First frame": "is the first frame of [Shot 1], serving as a concrete opening-frame anchor.",
+        "Intermediate keyframe": (
+            "is an intermediate keyframe whose exact placement is established in "
+            "detailed_description."
+        ),
+        "Last frame": (
+            f"is the last frame of [Shot {final_shot}], aligned with the target video's "
+            "exact duration."
+        ),
+        "Storyboard/composition": (
+            "is a storyboard/composition reference for the shot planning, viewpoint, "
+            "and subject placement described below."
+        ),
+    }
+    for index, role in enumerate(expected_picture_roles, start=1):
+        clause = clauses.get(role)
+        if clause is None:
+            continue
+        line_pattern = rf"^<Picture {index}>[^\r\n]*$"
+        line_match = re.search(line_pattern, definitions, flags=re.MULTILINE)
+        role_pattern = {
+            "First frame": r"\b(?:first|opening) frame\b",
+            "Intermediate keyframe": r"\bkeyframe\b",
+            "Last frame": r"\b(?:last|final) frame\b",
+            "Storyboard/composition": r"\b(?:storyboard|composition)\b",
+        }[role]
+        if line_match and re.search(role_pattern, line_match.group(0), flags=re.IGNORECASE):
+            continue
+        canonical_line = f"<Picture {index}> {clause}"
+        if line_match:
+            original = line_match.group(0)
+            definitions = definitions.replace(
+                original,
+                original.rstrip().rstrip(".") + f"; it {clause}",
+                1,
+            )
+        else:
+            definitions += "\n" + canonical_line
+    return definitions + "\n\n" + remainder
+
+
 def _validate_h3_output(
     text: str,
     skill: str,
@@ -398,19 +474,14 @@ def _validate_h3_output(
     errors = _ordered_fields_errors(text, _REF_FIELDS if skill == "ref2VA" else _BASE_FIELDS)
     duration_text = _format_duration(duration)
     body = _description_body(text, skill)
-    shots = [int(value) for value in re.findall(r"\[Shot\s+(\d+)\]", body)]
-    unique_shots: list[int] = []
-    for shot in shots:
-        if not unique_shots or shot != unique_shots[-1]:
-            unique_shots.append(shot)
+    unique_shots, cuts = _shot_headers(body)
     if not unique_shots or unique_shots != list(range(1, len(unique_shots) + 1)):
         errors.append("Shot numbers in the description must be sequential starting at Shot 1.")
     if int(shot_count) > 0 and len(unique_shots) != int(shot_count):
         errors.append(f"Expected exactly {int(shot_count)} shots, found {len(unique_shots)}.")
 
-    cut_matches = re.findall(r"\[Shot\s+(\d+)\]\s+At\s+(\d{2}):(\d{2}\.\d{3})", body)
-    cut_times = [int(minutes) * 60 + float(seconds) for _, minutes, seconds in cut_matches]
-    if len(cut_matches) != max(0, len(unique_shots) - 1):
+    cut_times = [timestamp for _, timestamp in cuts]
+    if len(cuts) != max(0, len(unique_shots) - 1):
         errors.append("Every shot after Shot 1 must begin with `At MM:SS.mmm`.")
     if cut_times != sorted(cut_times) or len(set(cut_times)) != len(cut_times):
         errors.append("Cut timestamps must be strictly increasing.")
@@ -856,6 +927,7 @@ class SmartH3Prompt:
                 pil_video=pil_video,
                 video_fps=float(video_fps),
                 audio_waveform=audio_waveform,
+                do_sample=False,
             ).strip()
             generation_system = _generation_system_prompt(skill, workflow)
             generation_user = _generation_user_prompt(
@@ -874,8 +946,13 @@ class SmartH3Prompt:
                 system_prompt=generation_system,
                 user_prompt=generation_user,
                 max_tokens=int(max_tokens),
+                do_sample=False,
             )
             cleaned = _sanitize_output(draft, skill)
+            if skill == "ref2VA":
+                cleaned = _ensure_picture_role_definitions(
+                    cleaned, active_ref_roles, int(shot_count)
+                )
             errors = _validate_h3_output(
                 cleaned,
                 skill,
@@ -889,8 +966,16 @@ class SmartH3Prompt:
                 required_ref_tasks=required_ref_tasks,
                 expected_picture_roles=active_ref_roles,
             )
-            if errors:
-                logger.warning("SmartH3Prompt: repairing %d validation issue(s).", len(errors))
+            max_repair_passes = 2
+            for repair_attempt in range(1, max_repair_passes + 1):
+                if not errors:
+                    break
+                logger.warning(
+                    "SmartH3Prompt: repair pass %d/%d for %d validation issue(s).",
+                    repair_attempt,
+                    max_repair_passes,
+                    len(errors),
+                )
                 repair_system, repair_user = _repair_prompts(
                     skill,
                     workflow,
@@ -907,10 +992,15 @@ class SmartH3Prompt:
                         system_prompt=repair_system,
                         user_prompt=repair_user,
                         max_tokens=int(max_tokens),
+                        do_sample=False,
                     ),
                     skill,
                 )
-                remaining = _validate_h3_output(
+                if skill == "ref2VA":
+                    cleaned = _ensure_picture_role_definitions(
+                        cleaned, active_ref_roles, int(shot_count)
+                    )
+                errors = _validate_h3_output(
                     cleaned,
                     skill,
                     workflow,
@@ -923,11 +1013,12 @@ class SmartH3Prompt:
                     required_ref_tasks=required_ref_tasks,
                     expected_picture_roles=active_ref_roles,
                 )
-                if remaining:
-                    raise RuntimeError(
-                        "SmartH3Prompt: generated prompt remained invalid after one repair pass:\n- "
-                        + "\n- ".join(remaining)
-                    )
+            if errors:
+                raise RuntimeError(
+                    f"SmartH3Prompt: generated prompt remained invalid after "
+                    f"{max_repair_passes} repair passes:\n- "
+                    + "\n- ".join(errors)
+                )
             return cleaned, analysis
         finally:
             if unload_model:

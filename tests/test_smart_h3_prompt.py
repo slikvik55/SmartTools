@@ -174,6 +174,35 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(any("before the target duration" in error for error in errors))
         self.assertTrue(any("Verbatim" in error for error in errors))
 
+    def test_shot_parser_ignores_in_body_shot_references(self):
+        body = (
+            "detailed_description:\n"
+            "Cinematic style.\n"
+            "[Shot 1] The composition follows <Picture 1> and references the framing planned "
+            "for [Shot 2] without creating a cut.\n\n"
+            "overall_soundscape:\nQuiet room tone.\n\n"
+            "non_diegetic_music:\nN/A"
+        )
+        headers, cuts = h3._shot_headers(h3._description_body(body, "ref2VA"))
+        self.assertEqual(headers, [1])
+        self.assertEqual(cuts, [])
+
+    def test_concrete_picture_role_definition_is_restored(self):
+        text = (
+            "subject_definitions:\n"
+            "<Subject 1> comes from <Picture 1>.\n\n"
+            "summary:\n[keyframe completion] A subject appears.\n\n"
+            "retention_analysis:\n...\n\n"
+            "detailed_description:\n[Shot 1] The subject appears.\n\n"
+            "overall_soundscape:\nN/A\n\n"
+            "non_diegetic_music:\nN/A"
+        )
+        repaired = h3._ensure_picture_role_definitions(text, ["First frame"], 1)
+        self.assertIn(
+            "<Picture 1> is the first frame of [Shot 1]",
+            repaired,
+        )
+
     def test_cleanup_removes_wrapper_but_keeps_spec(self):
         cleaned = h3._sanitize_output(
             "Here is the prompt:\n```text\nintegrated_multimodal_description: [Shot 1] X\n"
@@ -268,8 +297,10 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(analysis, "PICTURES\nA factual red ball.")
         self.assertIn("A factual red ball.", calls[1]["user_prompt"])
         self.assertIsNone(calls[1].get("audio_waveform"))
+        self.assertFalse(calls[0]["do_sample"])
+        self.assertFalse(calls[1]["do_sample"])
 
-    def test_invalid_draft_gets_one_text_only_repair(self):
+    def test_invalid_draft_can_use_second_text_only_repair(self):
         invalid = (
             "integrated_multimodal_description: [Shot 1] X\n\n"
             "non_diegetic_music: N/A"
@@ -279,7 +310,7 @@ class PipelineTests(unittest.TestCase):
             "overall_soundscape: Quiet room tone.\n\n"
             "non_diegetic_music: N/A"
         )
-        results = iter(("UNCERTAINTIES\nNone.", invalid, valid))
+        results = iter(("UNCERTAINTIES\nNone.", invalid, invalid, valid))
         calls = []
 
         def fake_generate(*args, **kwargs):
@@ -313,12 +344,13 @@ class PipelineTests(unittest.TestCase):
                 max_video_frames=32,
             )
         self.assertEqual(prompt, valid)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertIn("Missing required field `overall_soundscape:`", calls[2]["user_prompt"])
         self.assertIn("USER'S CREATIVE INTENT", calls[2]["user_prompt"])
         self.assertNotIn("pil_images", calls[2])
         self.assertNotIn("pil_video", calls[2])
         self.assertNotIn("audio_waveform", calls[2])
+        self.assertNotIn("pil_images", calls[3])
 
     def test_explicit_ref_roles_become_required_summary_tasks(self):
         tasks = h3._required_ref_task_types(
