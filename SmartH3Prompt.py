@@ -39,6 +39,20 @@ _STYLES = (
     "Vintage film",
 )
 _AUDIO_USAGES = ("Auto from prompt", "Copy/reuse", "Reference only", "Ignore")
+_REF_IMAGE_ROLES = (
+    "Auto from prompt",
+    "Subject/reference",
+    "First frame",
+    "Intermediate keyframe",
+    "Last frame",
+    "Storyboard/composition",
+)
+_REF_VIDEO_ROLES = (
+    "Auto from prompt",
+    "Reference generation",
+    "Video editing",
+    "Video continuation",
+)
 _BASE_FIELDS = (
     "integrated_multimodal_description:",
     "overall_soundscape:",
@@ -104,6 +118,13 @@ def _active_image_tensors(
     return [image for image in images[:required] if image is not None]
 
 
+def _active_ref_image_roles(
+    images: list[torch.Tensor | None],
+    roles: list[str],
+) -> list[str]:
+    return [role for image, role in zip(images, roles) if image is not None]
+
+
 def _asset_inventory(
     skill: str,
     workflow: str,
@@ -111,8 +132,11 @@ def _asset_inventory(
     has_video: bool,
     has_audio: bool,
     audio_duration: float | None,
+    ref_image_roles: list[str] | None = None,
+    ref_video_role: str = "Auto from prompt",
 ) -> str:
     lines: list[str] = []
+    image_roles = ref_image_roles or []
     for index in range(image_count):
         if skill == "base":
             role = {
@@ -125,10 +149,32 @@ def _asset_inventory(
                 "L2VA": "the exact last frame at the target duration",
             }.get(workflow, "visual reference")
         else:
-            role = "reference image whose role must follow the user's request"
+            selected = image_roles[index] if index < len(image_roles) else "Auto from prompt"
+            role = {
+                "Auto from prompt": "role inferred from the user's request",
+                "Subject/reference": (
+                    "subject/reference source; abstract reusable visible content into Subject labels"
+                ),
+                "First frame": "concrete first frame of the target video at 0.00 seconds",
+                "Intermediate keyframe": (
+                    "concrete intermediate keyframe at timing established by the user's request"
+                ),
+                "Last frame": "concrete last frame at the exact target duration",
+                "Storyboard/composition": (
+                    "storyboard/composition reference for shot planning, viewpoint, and placement"
+                ),
+            }.get(selected, "role inferred from the user's request")
         lines.append(f"- Picture {index + 1}: {role}.")
     if has_video:
-        lines.append("- Video 1: inspect its visible subjects, motion, camera, cuts, rhythm, and timing.")
+        video_role = (
+            "role inferred from the user's request"
+            if ref_video_role == "Auto from prompt"
+            else ref_video_role.lower()
+        )
+        lines.append(
+            f"- Video 1: {video_role}; inspect its visible subjects, motion, camera, cuts, "
+            "rhythm, and timing."
+        )
     if has_audio:
         duration_text = f"{audio_duration:.3f} seconds" if audio_duration is not None else "unknown"
         lines.append(
@@ -250,6 +296,7 @@ def _generation_user_prompt(
     analysis: str,
     user_prompt: str,
     controls: str,
+    required_ref_tasks: tuple[str, ...] = (),
 ) -> str:
     if skill == "base":
         mode = (
@@ -258,10 +305,18 @@ def _generation_user_prompt(
             "useful analyzed visual and audible traits directly into the three base fields."
         )
     else:
+        task_instruction = (
+            "The summary task-type prefix must include: "
+            + " + ".join(required_ref_tasks)
+            + "."
+            if required_ref_tasks
+            else "Infer the summary task-type prefix from every active asset role and user intent."
+        )
         mode = (
             "Use full-reference ref2VA mode. Ignore the base_workflow selector. Number connected "
             "pictures densely in the order listed, with Video 1 and Audio 1 when active. Define "
-            "reusable visible content as Subject labels, and emit all six required sections."
+            "reusable visible content as Subject labels, and emit all six required sections. "
+            + task_instruction
         )
     return f"""MODE AND MAPPING
 {mode}
@@ -292,6 +347,19 @@ def _sanitize_output(text: str, skill: str) -> str:
     positions = [value.find(marker) for marker in starts if value.find(marker) >= 0]
     if positions:
         value = value[min(positions):]
+    if skill == "ref2VA":
+        value = re.sub(
+            r"<\s*(subject|picture|video|audio)\s*(\d+)\s*>",
+            lambda match: f"<{match.group(1).title()} {match.group(2)}>",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
+            r"(?<!<)\b(subject|picture|video|audio)\s+(\d+)\b(?!>)",
+            lambda match: f"<{match.group(1).title()} {match.group(2)}>",
+            value,
+            flags=re.IGNORECASE,
+        )
     return value.strip()
 
 
@@ -324,6 +392,8 @@ def _validate_h3_output(
     expected_picture_count: int = 0,
     expect_video: bool = False,
     expect_audio: bool = False,
+    required_ref_tasks: tuple[str, ...] = (),
+    expected_picture_roles: list[str] | None = None,
 ) -> list[str]:
     errors = _ordered_fields_errors(text, _REF_FIELDS if skill == "ref2VA" else _BASE_FIELDS)
     duration_text = _format_duration(duration)
@@ -390,6 +460,27 @@ def _validate_h3_output(
             errors.append(f"{workflow} must reference <Picture 1>.")
     else:
         definitions = text[: text.find("summary:")] if "summary:" in text else ""
+        summary_match = re.search(r"summary:\s*\[([^\]]+)\]", text)
+        if summary_match is None:
+            errors.append("ref2VA summary must begin with a square-bracketed task-type prefix.")
+        else:
+            actual_tasks = {
+                value.strip().lower() for value in summary_match.group(1).split("+")
+            }
+            for task in required_ref_tasks:
+                if task.lower() not in actual_tasks:
+                    errors.append(
+                        f"ref2VA summary task-type prefix must include `{task}`."
+                    )
+            if "video editing" in required_ref_tasks:
+                after_prefix = text[summary_match.end():].lstrip()
+                if not after_prefix.startswith(
+                    "The target video is an edited version of <Video 1>."
+                ):
+                    errors.append(
+                        "A video-editing summary must begin with: "
+                        "`The target video is an edited version of <Video 1>.`"
+                    )
         picture_indices = {int(value) for value in re.findall(r"<Picture\s+(\d+)>", text)}
         if any(index < 1 or index > int(expected_picture_count) for index in picture_indices):
             errors.append("ref2VA output contains a Picture label with no connected image.")
@@ -400,6 +491,23 @@ def _validate_h3_output(
         for index in range(1, int(expected_picture_count) + 1):
             if f"<Picture {index}>" not in text:
                 errors.append(f"Connected reference <Picture {index}> is missing from ref2VA output.")
+        role_patterns = {
+            "First frame": r"\b(?:first|opening) frame\b",
+            "Intermediate keyframe": r"\bkeyframe\b",
+            "Last frame": r"\b(?:last|final) frame\b",
+            "Storyboard/composition": r"\b(?:storyboard|composition)\b",
+        }
+        for index, role in enumerate(expected_picture_roles or [], start=1):
+            pattern = role_patterns.get(role)
+            if pattern and not re.search(
+                rf"^<Picture {index}>[^\r\n]*{pattern}",
+                definitions,
+                flags=re.IGNORECASE | re.MULTILINE,
+            ):
+                errors.append(
+                    f"<Picture {index}> must have a standalone subject_definitions entry "
+                    f"that identifies its `{role}` role."
+                )
         if expect_video and "<Video 1>" not in text:
             errors.append("Connected reference <Video 1> is missing from ref2VA output.")
         if expect_audio and "<Audio 1>" not in text:
@@ -422,18 +530,52 @@ def _validate_h3_output(
     return errors
 
 
+def _required_ref_task_types(
+    image_roles: list[str],
+    has_video: bool,
+    has_audio: bool,
+    ref_video_role: str,
+    audio_usage: str,
+) -> tuple[str, ...]:
+    tasks: list[str] = []
+    if any(
+        role in ("First frame", "Intermediate keyframe", "Last frame")
+        for role in image_roles
+    ):
+        tasks.append("keyframe completion")
+    if any(
+        role in ("Subject/reference", "Storyboard/composition")
+        for role in image_roles
+    ):
+        tasks.append("reference generation")
+    if has_video and ref_video_role != "Auto from prompt":
+        tasks.append(ref_video_role.lower())
+    if has_audio and audio_usage == "Copy/reuse":
+        tasks.append("audio reuse")
+    elif has_audio and audio_usage == "Reference only":
+        tasks.append("audio reference")
+    return tuple(dict.fromkeys(tasks))
+
+
 def _repair_prompts(
     skill: str,
     workflow: str,
     errors: list[str],
     draft: str,
     verbatim_dialogue: str,
+    generation_system: str,
+    generation_user: str,
 ) -> tuple[str, str]:
-    system = """Repair a MiniMax H3 prompt using the supplied validation errors.
+    system = generation_system + """
+
+REPAIR INSTRUCTION
+Repair a MiniMax H3 prompt using the supplied validation errors.
 Return only the corrected prompt, with no markdown fence or explanation. Preserve factual content,
-reference identities, and verbatim dialogue. Change only what is needed for compliance."""
+reference identities, all connected reference labels, their assigned roles, and verbatim dialogue.
+Change only what is needed for compliance."""
     user = (
-        f"Skill: {skill}\nWorkflow: {workflow}\nValidation errors:\n- "
+        generation_user
+        + f"\n\nREPAIR TARGET\nSkill: {skill}\nWorkflow: {workflow}\nValidation errors:\n- "
         + "\n- ".join(errors)
         + f"\n\nVerbatim dialogue/lyrics:\n{verbatim_dialogue or '(none)'}"
         + f"\n\nMalformed draft:\n{draft}"
@@ -461,6 +603,41 @@ class SmartH3Prompt:
                 "base_workflow": (
                     list(_BASE_WORKFLOWS),
                     {"default": "T2VA", "tooltip": "Used only when skill is base."},
+                ),
+                "ref_image_1_role": (
+                    list(_REF_IMAGE_ROLES),
+                    {
+                        "default": "Auto from prompt",
+                        "tooltip": "ref2VA only. Role of image_1; ignored when disconnected.",
+                    },
+                ),
+                "ref_image_2_role": (
+                    list(_REF_IMAGE_ROLES),
+                    {
+                        "default": "Auto from prompt",
+                        "tooltip": "ref2VA only. Role of image_2; ignored when disconnected.",
+                    },
+                ),
+                "ref_image_3_role": (
+                    list(_REF_IMAGE_ROLES),
+                    {
+                        "default": "Auto from prompt",
+                        "tooltip": "ref2VA only. Role of image_3; ignored when disconnected.",
+                    },
+                ),
+                "ref_image_4_role": (
+                    list(_REF_IMAGE_ROLES),
+                    {
+                        "default": "Auto from prompt",
+                        "tooltip": "ref2VA only. Role of image_4; ignored when disconnected.",
+                    },
+                ),
+                "ref_video_role": (
+                    list(_REF_VIDEO_ROLES),
+                    {
+                        "default": "Auto from prompt",
+                        "tooltip": "ref2VA only. How the connected source video is used.",
+                    },
                 ),
                 "prompt": (
                     "STRING",
@@ -533,6 +710,11 @@ class SmartH3Prompt:
         model_folder: str,
         skill: str,
         base_workflow: str,
+        ref_image_1_role: str,
+        ref_image_2_role: str,
+        ref_image_3_role: str,
+        ref_image_4_role: str,
+        ref_video_role: str,
         prompt: str,
         verbatim_dialogue: str,
         video_duration: float,
@@ -555,6 +737,11 @@ class SmartH3Prompt:
             model_folder,
             skill,
             base_workflow,
+            ref_image_1_role,
+            ref_image_2_role,
+            ref_image_3_role,
+            ref_image_4_role,
+            ref_video_role,
             prompt,
             verbatim_dialogue,
             float(video_duration),
@@ -576,6 +763,11 @@ class SmartH3Prompt:
         model_folder: str,
         skill: str,
         base_workflow: str,
+        ref_image_1_role: str,
+        ref_image_2_role: str,
+        ref_image_3_role: str,
+        ref_image_4_role: str,
+        ref_video_role: str,
         prompt: str,
         verbatim_dialogue: str,
         video_duration: float,
@@ -597,8 +789,20 @@ class SmartH3Prompt:
         skill = "ref2VA" if skill == "ref2VA" else "base"
         workflow = base_workflow if base_workflow in _BASE_WORKFLOWS else "T2VA"
         duration_text = _format_duration(video_duration)
+        image_tensors = [image_1, image_2, image_3, image_4]
+        image_roles = [
+            ref_image_1_role,
+            ref_image_2_role,
+            ref_image_3_role,
+            ref_image_4_role,
+        ]
         active_tensors = _active_image_tensors(
-            skill, workflow, [image_1, image_2, image_3, image_4]
+            skill, workflow, image_tensors
+        )
+        active_ref_roles = (
+            _active_ref_image_roles(image_tensors, image_roles)
+            if skill == "ref2VA"
+            else []
         )
         pil_images = [_comfy_image_to_pil(image) for image in active_tensors]
         pil_video = (
@@ -613,6 +817,19 @@ class SmartH3Prompt:
             pil_video is not None,
             audio_waveform is not None,
             audio_duration,
+            ref_image_roles=active_ref_roles,
+            ref_video_role=ref_video_role,
+        )
+        required_ref_tasks = (
+            _required_ref_task_types(
+                active_ref_roles,
+                pil_video is not None,
+                audio_waveform is not None,
+                ref_video_role,
+                audio_usage,
+            )
+            if skill == "ref2VA"
+            else ()
         )
         controls = _controls_text(
             duration_text,
@@ -640,19 +857,22 @@ class SmartH3Prompt:
                 video_fps=float(video_fps),
                 audio_waveform=audio_waveform,
             ).strip()
+            generation_system = _generation_system_prompt(skill, workflow)
+            generation_user = _generation_user_prompt(
+                skill,
+                workflow,
+                duration_text,
+                inventory,
+                analysis,
+                prompt,
+                controls,
+                required_ref_tasks,
+            )
             draft = _generate_text(
                 model,
                 processor,
-                system_prompt=_generation_system_prompt(skill, workflow),
-                user_prompt=_generation_user_prompt(
-                    skill,
-                    workflow,
-                    duration_text,
-                    inventory,
-                    analysis,
-                    prompt,
-                    controls,
-                ),
+                system_prompt=generation_system,
+                user_prompt=generation_user,
                 max_tokens=int(max_tokens),
             )
             cleaned = _sanitize_output(draft, skill)
@@ -666,11 +886,19 @@ class SmartH3Prompt:
                 expected_picture_count=len(pil_images),
                 expect_video=pil_video is not None,
                 expect_audio=audio_waveform is not None,
+                required_ref_tasks=required_ref_tasks,
+                expected_picture_roles=active_ref_roles,
             )
             if errors:
                 logger.warning("SmartH3Prompt: repairing %d validation issue(s).", len(errors))
                 repair_system, repair_user = _repair_prompts(
-                    skill, workflow, errors, cleaned, verbatim_dialogue
+                    skill,
+                    workflow,
+                    errors,
+                    cleaned,
+                    verbatim_dialogue,
+                    generation_system,
+                    generation_user,
                 )
                 cleaned = _sanitize_output(
                     _generate_text(
@@ -692,6 +920,8 @@ class SmartH3Prompt:
                     expected_picture_count=len(pil_images),
                     expect_video=pil_video is not None,
                     expect_audio=audio_waveform is not None,
+                    required_ref_tasks=required_ref_tasks,
+                    expected_picture_roles=active_ref_roles,
                 )
                 if remaining:
                     raise RuntimeError(

@@ -131,6 +131,8 @@ Uses the same local Hugging Face model cache as Smart LLM to analyze references 
 |--------|-------|
 | `skill` | **base** for T2VA/I2VA/FL2VA/L2VA, or **ref2VA** for full-reference six-section output. |
 | `base_workflow` | Explicit base workflow. Ignored by ref2VA. |
+| `ref_image_1_role`…`ref_image_4_role` | ref2VA only: assign each image independently as Auto, subject/reference, first frame, intermediate keyframe, last frame, or storyboard/composition. A disconnected image's role is ignored. |
+| `ref_video_role` | ref2VA only: infer from the prompt, use the video for `reference generation`, treat it as a `video editing` source, or perform `video continuation`. |
 | `prompt` | Creative intent and desired use of references. The base workflow does not need to be repeated here. |
 | `verbatim_dialogue` | Optional dialogue/lyrics to preserve exactly inside H3 `<d>` blocks. |
 | `video_duration` | Exact target duration in seconds (default **15.00**); controls final-frame alignment and valid cut range. |
@@ -149,7 +151,9 @@ Base image mapping:
 - **FL2VA:** requires `image_1` as Picture 1 at 0.00 and `image_2` as Picture 2 at the exact final duration.
 - **L2VA:** requires `image_1`, mapped to `<Picture 1>` at the exact final duration.
 
-ref2VA uses all connected images in socket order, skipping gaps, then exposes the video and audio as `<Video 1>` and `<Audio 1>` when active. Reusable people, objects, scenes, styles, or actions are defined separately as `<Subject N>` by the model.
+ref2VA uses all connected images in socket order, skipping gaps, then exposes the video and audio as `<Video 1>` and `<Audio 1>` when active. Each connected image keeps the role selected for its original socket: if only `image_1` and `image_3` are connected, they become `<Picture 1>` and `<Picture 2>` while using `ref_image_1_role` and `ref_image_3_role`. Reusable people, objects, scenes, styles, or actions are defined separately as `<Subject N>` by the model.
+
+`base_workflow` remains separate from ref2VA task types because base workflows are mutually exclusive, while a ref2VA summary may combine several relationships. First/intermediate/last-frame roles require `keyframe completion`; subject/reference and storyboard/composition roles require `reference generation`. These can combine with the selected video and audio tasks—for example, a character-reference image + a last-frame image + an edited source video + reference-only audio requires `[keyframe completion + reference generation + video editing + audio reference]`. Any role left on **Auto from prompt** is inferred from the user prompt and media analysis.
 
 The audio socket accepts `{"waveform": Tensor[B,C,T], "sample_rate": int}`, the same payload returned by VideoHelperSuite `LoadAudio`. Audio is mixed to mono and resampled to 16 kHz for inference. The selected checkpoint must support every connected modality; Gemma 4 E2B, E4B, and 12B variants support native audio, while many vision-language checkpoints do not. If source-audio and target-video durations differ, the prompt is instructed to describe partial reuse, trimming, continuation, or padding rather than claiming impossible 1:1 reuse.
 

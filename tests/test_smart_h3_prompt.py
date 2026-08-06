@@ -102,9 +102,24 @@ class WorkflowTests(unittest.TestCase):
             "ref2VA", "T2VA", [self.image, None, self.image, None]
         )
         self.assertEqual(len(active), 2)
-        inventory = h3._asset_inventory("ref2VA", "T2VA", 2, True, True, 3.5)
+        roles = h3._active_ref_image_roles(
+            [self.image, None, self.image, None],
+            ["Subject/reference", "First frame", "Last frame", "Auto from prompt"],
+        )
+        self.assertEqual(roles, ["Subject/reference", "Last frame"])
+        inventory = h3._asset_inventory(
+            "ref2VA",
+            "T2VA",
+            2,
+            True,
+            True,
+            3.5,
+            ref_image_roles=roles,
+        )
         self.assertIn("Picture 1", inventory)
         self.assertIn("Picture 2", inventory)
+        self.assertIn("subject/reference source", inventory)
+        self.assertIn("concrete last frame", inventory)
         self.assertIn("Video 1", inventory)
         self.assertIn("Audio 1", inventory)
 
@@ -168,6 +183,17 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(cleaned.startswith("integrated_multimodal_description:"))
         self.assertNotIn("```", cleaned)
 
+    def test_ref_cleanup_canonicalizes_reference_labels(self):
+        cleaned = h3._sanitize_output(
+            "subject_definitions:\n"
+            "Picture 1 is a first frame.\n"
+            "<picture2> is a last frame from subject 3.",
+            "ref2VA",
+        )
+        self.assertIn("<Picture 1>", cleaned)
+        self.assertIn("<Picture 2>", cleaned)
+        self.assertIn("<Subject 3>", cleaned)
+
     def test_ref2va_requires_every_connected_asset_label(self):
         text = (
             "subject_definitions:\n"
@@ -189,9 +215,13 @@ class ValidationTests(unittest.TestCase):
             0,
             expected_picture_count=1,
             expect_audio=True,
+            required_ref_tasks=("keyframe completion", "audio reference"),
+            expected_picture_roles=["Last frame"],
         )
         self.assertTrue(any("<Audio 1>" in error for error in errors))
-        self.assertFalse(any("<Picture 1>" in error for error in errors))
+        self.assertFalse(any("Connected reference <Picture 1> is missing" in error for error in errors))
+        self.assertTrue(any("keyframe completion" in error for error in errors))
+        self.assertTrue(any("`Last frame` role" in error for error in errors))
 
 
 class PipelineTests(unittest.TestCase):
@@ -217,6 +247,11 @@ class PipelineTests(unittest.TestCase):
                 model_folder="model",
                 skill="base",
                 base_workflow="T2VA",
+                ref_image_1_role="Auto from prompt",
+                ref_image_2_role="Auto from prompt",
+                ref_image_3_role="Auto from prompt",
+                ref_image_4_role="Auto from prompt",
+                ref_video_role="Auto from prompt",
                 prompt="A red ball rolls.",
                 verbatim_dialogue="",
                 video_duration=15.0,
@@ -260,6 +295,11 @@ class PipelineTests(unittest.TestCase):
                 model_folder="model",
                 skill="base",
                 base_workflow="T2VA",
+                ref_image_1_role="Auto from prompt",
+                ref_image_2_role="Auto from prompt",
+                ref_image_3_role="Auto from prompt",
+                ref_image_4_role="Auto from prompt",
+                ref_video_role="Auto from prompt",
                 prompt="A static shot.",
                 verbatim_dialogue="",
                 video_duration=15.0,
@@ -275,9 +315,42 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(prompt, valid)
         self.assertEqual(len(calls), 3)
         self.assertIn("Missing required field `overall_soundscape:`", calls[2]["user_prompt"])
+        self.assertIn("USER'S CREATIVE INTENT", calls[2]["user_prompt"])
         self.assertNotIn("pil_images", calls[2])
         self.assertNotIn("pil_video", calls[2])
         self.assertNotIn("audio_waveform", calls[2])
+
+    def test_explicit_ref_roles_become_required_summary_tasks(self):
+        tasks = h3._required_ref_task_types(
+            image_roles=["First frame", "Subject/reference", "Last frame"],
+            has_video=True,
+            has_audio=True,
+            ref_video_role="Video editing",
+            audio_usage="Reference only",
+        )
+        self.assertEqual(
+            tasks,
+            (
+                "keyframe completion",
+                "reference generation",
+                "video editing",
+                "audio reference",
+            ),
+        )
+        generation_prompt = h3._generation_user_prompt(
+            "ref2VA",
+            "T2VA",
+            "15.00",
+            "assets",
+            "analysis",
+            "intent",
+            "controls",
+            tasks,
+        )
+        self.assertIn(
+            "keyframe completion + reference generation + video editing + audio reference",
+            generation_prompt,
+        )
 
 
 if __name__ == "__main__":
