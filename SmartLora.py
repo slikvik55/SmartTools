@@ -112,7 +112,42 @@ class SmartLora:
     def _get_lora(self, lora_name):
         path = folder_paths.get_full_path_or_raise("loras", lora_name)
         if path not in self._lora_cache:
-            self._lora_cache[path] = comfy.utils.load_torch_file(path, safe_load=True)
+            try:
+                self._lora_cache[path] = comfy.utils.load_torch_file(path, safe_load=True)
+            except json.JSONDecodeError as e:
+                try:
+                    size = os.path.getsize(path)
+                    with open(path, "rb") as file:
+                        prefix = file.read(256).lstrip().lower()
+                except OSError:
+                    size = -1
+                    prefix = b""
+
+                if prefix.startswith(b"version https://git-lfs.github.com/spec"):
+                    diagnosis = (
+                        "The file is a Git LFS pointer rather than downloaded model weights."
+                    )
+                elif prefix.startswith((b"<html", b"<!doctype html")):
+                    diagnosis = "The file contains an HTML download/error page instead of weights."
+                elif size < 16:
+                    diagnosis = "The file is empty or truncated."
+                else:
+                    diagnosis = "The safetensors header is corrupt or the download is incomplete."
+                size_text = f"{size:,} bytes" if size >= 0 else "unknown size"
+                raise RuntimeError(
+                    f"SmartLora: failed to load {lora_name!r} from {path!r} ({size_text}). "
+                    f"{diagnosis} Re-download or replace this LoRA file."
+                ) from e
+            except Exception as e:
+                try:
+                    size = os.path.getsize(path)
+                    size_text = f"{size:,} bytes"
+                except OSError:
+                    size_text = "unknown size"
+                raise RuntimeError(
+                    f"SmartLora: failed to load {lora_name!r} from {path!r} ({size_text}). "
+                    f"{type(e).__name__}: {e}"
+                ) from e
         return self._lora_cache[path]
 
     def _merge_prompt(self, prompt_input, prompt_text):
