@@ -16,6 +16,7 @@ from .SmartLLM import (
     _image_tensor_cache_key,
     _load_model,
     _normalize_attn,
+    _normalize_device_placement,
     _prepare_comfy_audio,
     _throw_if_interrupted,
     _validate_model_folder,
@@ -753,6 +754,26 @@ class SmartH3Prompt:
                     "INT",
                     {"default": 32, "min": 0, "max": 4096, "step": 1},
                 ),
+                "device_placement": (
+                    ["cuda", "auto"],
+                    {
+                        "default": "cuda",
+                        "tooltip": (
+                            "cuda forces the complete HF model onto GPU after freeing Comfy's "
+                            "cached models. auto permits very slow CPU offload if VRAM is tight."
+                        ),
+                    },
+                ),
+                "enable_thinking": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Keep OFF for H3 prompts. Reasoning-capable templates can otherwise "
+                            "spend the output budget thinking and omit required H3 fields."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "image_1": ("IMAGE",),
@@ -794,6 +815,8 @@ class SmartH3Prompt:
         audio_usage: str,
         max_tokens: int,
         attn_implementation: str,
+        device_placement: str,
+        enable_thinking: bool,
         unload_model: bool,
         video_fps: float,
         max_video_frames: int,
@@ -821,6 +844,8 @@ class SmartH3Prompt:
             audio_usage,
             int(max_tokens),
             attn_implementation,
+            device_placement,
+            bool(enable_thinking),
             bool(unload_model),
             float(video_fps),
             int(max_video_frames),
@@ -847,6 +872,8 @@ class SmartH3Prompt:
         audio_usage: str,
         max_tokens: int,
         attn_implementation: str,
+        device_placement: str,
+        enable_thinking: bool,
         unload_model: bool,
         video_fps: float,
         max_video_frames: int,
@@ -913,9 +940,10 @@ class SmartH3Prompt:
 
         resolved = _validate_model_folder(model_folder)
         attn_norm = _normalize_attn(attn_implementation)
-        cache_key = (resolved, attn_norm)
+        placement = _normalize_device_placement(device_placement)
+        cache_key = (resolved, attn_norm, placement)
         _throw_if_interrupted()
-        model, processor = _load_model(resolved, attn_norm)
+        model, processor = _load_model(resolved, attn_norm, placement)
         try:
             analysis = _generate_text(
                 model,
@@ -928,6 +956,7 @@ class SmartH3Prompt:
                 video_fps=float(video_fps),
                 audio_waveform=audio_waveform,
                 do_sample=False,
+                enable_thinking=bool(enable_thinking),
             ).strip()
             generation_system = _generation_system_prompt(skill, workflow)
             generation_user = _generation_user_prompt(
@@ -947,6 +976,7 @@ class SmartH3Prompt:
                 user_prompt=generation_user,
                 max_tokens=int(max_tokens),
                 do_sample=False,
+                enable_thinking=bool(enable_thinking),
             )
             cleaned = _sanitize_output(draft, skill)
             if skill == "ref2VA":
@@ -993,6 +1023,7 @@ class SmartH3Prompt:
                         user_prompt=repair_user,
                         max_tokens=int(max_tokens),
                         do_sample=False,
+                        enable_thinking=bool(enable_thinking),
                     ),
                     skill,
                 )

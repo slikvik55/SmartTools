@@ -106,6 +106,8 @@ Works with any checkpoint those Auto classes load — for example **Qwen3-VL** (
 | `prompt` | Multiline user prompt. |
 | `max_tokens` | Cap on **new** tokens decoded after the prompt (same idea as `max_new_tokens` in Transformers). Increase if output looks truncated. |
 | `attn_implementation` | Transformers attention: **`sdpa`** (default), **`eager`**, or **`flash_attention_2`** (requires `flash-attn` + CUDA; falls back to SDPA with a warning if unavailable). |
+| `device_placement` | **`cuda`** (default) frees Comfy-cached models and forces the complete HF model onto GPU, avoiding unpredictable CPU offload. **`auto`** lets Accelerate split/offload the model when VRAM is insufficient, which can make token generation dramatically slower. |
+| `enable_thinking` | Enables reasoning in chat templates that support it. Default **OFF** for direct responses; reasoning can consume the full token budget before the final answer. |
 | `unload_model` | **ON** — after generation, drop the model and processor from memory and call CUDA cache cleanup so later nodes get more VRAM. **OFF** — keep the model loaded for the next run (same `model_folder` path). |
 | `video_fps` | Frame rate of the optional `video` batch (default **30**). Match VideoHelperSuite `force_rate` / loaded fps so temporal grounding is correct. Ignored when `video` is disconnected. |
 | `max_video_frames` | Cap on frames taken from `video` (even subsampling). Default **32**. **0** = use all frames, but batches larger than **64** are auto-capped (avoids multi‑minute hangs / VRAM blowups). Prefer VHS `frame_load_cap` for long clips. Ignored when `video` is disconnected. |
@@ -140,6 +142,8 @@ Uses the same local Hugging Face model cache as Smart LLM to analyze references 
 | `shot_count` | **0** lets the model choose; a positive value is validated as an exact shot count. |
 | `audio_usage` | Infer from prompt, copy/reuse, reference only, or ignore connected audio. |
 | `max_tokens` | Generation budget, default **4096** to accommodate detailed ref2VA output. |
+| `device_placement` | **cuda** by default to prevent intermittent CPU-offloaded runs; use **auto** only when the checkpoint cannot fit fully in VRAM. |
+| `enable_thinking` | Default **OFF** and normally should remain off for H3. Thinking can exhaust `max_tokens` before required fields such as `detailed_description`. |
 | `image_1`…`image_4` | Optional still references. Base workflows use only their prescribed sockets; ref2VA numbers connected images densely. |
 | `video` | Optional VHS-style `IMAGE` frame batch, with `video_fps` and `max_video_frames` matching Smart LLM. |
 | `audio` | Optional standard `AUDIO` dictionary, directly connectable from VideoHelperSuite **Load Audio**. |

@@ -11,6 +11,7 @@ import gc
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 # Soft cap when max_video_frames=0 (use-all). Full VHS batches at 30fps easily
 # hang/OOM Qwen3-VL with no Comfy progress updates.
@@ -352,7 +353,7 @@ def _effective_attn_implementation(normalized: str) -> str:
     return normalized
 
 
-def _free_cache_entry(cache_key: tuple[str, str]) -> None:
+def _free_cache_entry(cache_key: tuple[str, str, str]) -> None:
     entry = _CACHE.pop(cache_key, None)
     if not entry:
         return
@@ -365,9 +366,36 @@ def _free_cache_entry(cache_key: tuple[str, str]) -> None:
         torch.cuda.empty_cache()
 
 
-def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tuple[Any, Any]:
+def _normalize_device_placement(value: str) -> str:
+    normalized = (value or "cuda").strip().lower()
+    return normalized if normalized in ("cuda", "auto") else "cuda"
+
+
+def _release_comfy_vram() -> None:
+    if not torch.cuda.is_available():
+        return
+    try:
+        import comfy.model_management as model_management
+
+        model_management.unload_all_models()
+        model_management.soft_empty_cache()
+    except Exception as e:
+        logger.warning(
+            "SmartLLM: could not release Comfy-managed VRAM before loading the HF model "
+            "(%s: %s).",
+            type(e).__name__,
+            e,
+        )
+
+
+def _load_model(
+    resolved_folder: str,
+    attn_implementation: str = "sdpa",
+    device_placement: str = "cuda",
+) -> tuple[Any, Any]:
     norm = _normalize_attn(attn_implementation)
-    cache_key = (resolved_folder, norm)
+    placement = _normalize_device_placement(device_placement)
+    cache_key = (resolved_folder, norm, placement)
     if cache_key in _CACHE:
         return _CACHE[cache_key]["model"], _CACHE[cache_key]["processor"]
 
@@ -398,13 +426,14 @@ def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tupl
     attn_eff = _effective_attn_implementation(norm)
 
     processor = _load_processor(resolved_folder, local_files_only=True)
+    _release_comfy_vram()
 
     load_kw: dict[str, Any] = {
         "torch_dtype": dtype,
         "local_files_only": True,
     }
     if torch.cuda.is_available():
-        load_kw["device_map"] = "auto"
+        load_kw["device_map"] = {"": 0} if placement == "cuda" else "auto"
         load_kw["attn_implementation"] = attn_eff
     else:
         load_kw["attn_implementation"] = attn_eff
@@ -412,6 +441,17 @@ def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tupl
     try:
         model = AutoModelForImageTextToText.from_pretrained(resolved_folder, **load_kw)
     except (TypeError, ValueError, ImportError, RuntimeError, OSError) as e:
+        error_text = str(e).lower()
+        if placement == "cuda" and (
+            "out of memory" in error_text
+            or "cuda error" in error_text
+            or "not enough memory" in error_text
+        ):
+            raise RuntimeError(
+                "SmartLLM: the checkpoint could not fit completely on the GPU with "
+                "device_placement=cuda. Close other GPU workloads or select `auto` to permit "
+                "CPU offload (which will be much slower)."
+            ) from e
         if load_kw.pop("attn_implementation", None) is None:
             raise
         logger.warning(
@@ -425,6 +465,16 @@ def _load_model(resolved_folder: str, attn_implementation: str = "sdpa") -> tupl
         model = model.to("cpu")
 
     model.eval()
+    device_map = getattr(model, "hf_device_map", None)
+    if isinstance(device_map, dict):
+        devices = sorted({str(device) for device in device_map.values()})
+        logger.info("SmartLLM: HF device placement=%s; devices=%s", placement, ", ".join(devices))
+        if any(device in ("cpu", "disk") for device in devices):
+            logger.warning(
+                "SmartLLM: the HF model is partly on %s; generation may be extremely slow. "
+                "Use device_placement=cuda for an explicit all-GPU load.",
+                ", ".join(device for device in devices if device in ("cpu", "disk")),
+            )
     _CACHE[cache_key] = {"model": model, "processor": processor}
     return model, processor
 
@@ -496,6 +546,7 @@ def _prepare_processor_inputs(
     pil_video: list[Any] | None = None,
     video_fps: float = 30.0,
     audio_waveform: torch.Tensor | None = None,
+    enable_thinking: bool = False,
 ) -> Any:
     """HF multimodal pattern: render chat as text, pass PIL images/videos into the processor."""
     messages: list[dict[str, Any]] = []
@@ -530,6 +581,7 @@ def _prepare_processor_inputs(
         messages,
         tokenize=False,
         add_generation_prompt=True,
+        enable_thinking=bool(enable_thinking),
     )
     proc_kw: dict[str, Any] = {"text": chat_str, "return_tensors": "pt"}
     if pil_images:
@@ -592,6 +644,7 @@ def _generate_text(
     video_fps: float = 30.0,
     audio_waveform: torch.Tensor | None = None,
     do_sample: bool | None = None,
+    enable_thinking: bool = False,
 ) -> str:
     """Run one shared local multimodal generation pass and decode only new tokens."""
     _throw_if_interrupted()
@@ -603,6 +656,7 @@ def _generate_text(
         pil_video=pil_video,
         video_fps=float(video_fps),
         audio_waveform=audio_waveform,
+        enable_thinking=bool(enable_thinking),
     )
     device = next(model.parameters()).device
     inputs = _move_batch_to_device(inputs, device)
@@ -619,10 +673,24 @@ def _generate_text(
     if stop is not None:
         gen_kw["stopping_criteria"] = stop
     _throw_if_interrupted()
+    started = time.perf_counter()
     with torch.inference_mode():
         out_ids = model.generate(**gen_kw)
     _throw_if_interrupted()
     ids_list = out_ids[0, input_len:].detach().cpu().tolist()
+    elapsed = max(0.001, time.perf_counter() - started)
+    logger.info(
+        "SmartLLM: generated %d token(s) in %.2fs (%.2f tokens/s).",
+        len(ids_list),
+        elapsed,
+        len(ids_list) / elapsed,
+    )
+    if len(ids_list) >= int(max_tokens):
+        logger.warning(
+            "SmartLLM: generation reached max_new_tokens=%d. The response may be truncated; "
+            "if it contains reasoning but no final answer, keep enable_thinking OFF.",
+            int(max_tokens),
+        )
     tok = getattr(processor, "tokenizer", None)
     if tok is None:
         raise RuntimeError("SmartLLM: processor has no tokenizer attribute.")
@@ -717,6 +785,28 @@ class SmartLLM:
                         ),
                     },
                 ),
+                "device_placement": (
+                    ["cuda", "auto"],
+                    {
+                        "default": "cuda",
+                        "tooltip": (
+                            "cuda forces the complete HF model onto GPU after freeing Comfy's "
+                            "cached models, preventing extremely slow CPU offload. auto permits "
+                            "Accelerate to offload layers when VRAM is insufficient."
+                        ),
+                    },
+                ),
+                "enable_thinking": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Enable reasoning/thinking in chat templates that support it. Keep OFF "
+                            "for direct answers and structured prompts; thinking can consume the "
+                            "entire token budget before the answer."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "image": (
@@ -760,6 +850,8 @@ class SmartLLM:
         prompt: str,
         max_tokens: int,
         attn_implementation: str,
+        device_placement: str,
+        enable_thinking: bool,
         unload_model: bool,
         video_fps: float = 30.0,
         max_video_frames: int = 32,
@@ -773,6 +865,8 @@ class SmartLLM:
             prompt,
             max_tokens,
             attn_implementation,
+            device_placement,
+            bool(enable_thinking),
             unload_model,
             float(video_fps),
             int(max_video_frames),
@@ -788,6 +882,8 @@ class SmartLLM:
         prompt: str,
         max_tokens: int,
         attn_implementation: str,
+        device_placement: str,
+        enable_thinking: bool,
         unload_model: bool,
         video_fps: float = 30.0,
         max_video_frames: int = 32,
@@ -797,7 +893,8 @@ class SmartLLM:
     ):
         resolved = _validate_model_folder(model_folder)
         attn_norm = _normalize_attn(attn_implementation)
-        cache_key = (resolved, attn_norm)
+        placement = _normalize_device_placement(device_placement)
+        cache_key = (resolved, attn_norm, placement)
 
         _throw_if_interrupted()
 
@@ -818,7 +915,7 @@ class SmartLLM:
             pil_video = _comfy_batch_to_pils(video, int(max_video_frames))
 
         _throw_if_interrupted()
-        model, processor = _load_model(resolved, attn_norm)
+        model, processor = _load_model(resolved, attn_norm, placement)
 
         _throw_if_interrupted()
         logger.info("SmartLLM: running processor (images=%d, video_frames=%d)…", len(pil_images), len(pil_video or []))
@@ -831,6 +928,7 @@ class SmartLLM:
             pil_images=pil_images,
             pil_video=pil_video,
             video_fps=float(video_fps),
+            enable_thinking=bool(enable_thinking),
         )
 
         if unload_model:

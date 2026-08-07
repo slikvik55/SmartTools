@@ -59,9 +59,11 @@ class AudioTests(unittest.TestCase):
             def __init__(self):
                 self.messages = None
                 self.kwargs = None
+                self.template_kwargs = None
 
             def apply_chat_template(self, messages, **kwargs):
                 self.messages = messages
+                self.template_kwargs = kwargs
                 return "rendered chat"
 
             def __call__(self, **kwargs):
@@ -76,10 +78,12 @@ class AudioTests(unittest.TestCase):
             "analyze",
             [],
             audio_waveform=waveform,
+            enable_thinking=False,
         )
         content_types = [item["type"] for item in processor.messages[-1]["content"]]
         self.assertEqual(content_types, ["audio", "text"])
         self.assertIs(processor.kwargs["audio"], waveform)
+        self.assertFalse(processor.template_kwargs["enable_thinking"])
 
 
 class WorkflowTests(unittest.TestCase):
@@ -289,6 +293,8 @@ class PipelineTests(unittest.TestCase):
                 audio_usage="Auto from prompt",
                 max_tokens=4096,
                 attn_implementation="sdpa",
+                device_placement="cuda",
+                enable_thinking=False,
                 unload_model=False,
                 video_fps=30.0,
                 max_video_frames=32,
@@ -299,6 +305,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(calls[1].get("audio_waveform"))
         self.assertFalse(calls[0]["do_sample"])
         self.assertFalse(calls[1]["do_sample"])
+        self.assertFalse(calls[0]["enable_thinking"])
+        self.assertFalse(calls[1]["enable_thinking"])
 
     def test_invalid_draft_can_use_second_text_only_repair(self):
         invalid = (
@@ -339,6 +347,8 @@ class PipelineTests(unittest.TestCase):
                 audio_usage="Ignore",
                 max_tokens=4096,
                 attn_implementation="sdpa",
+                device_placement="cuda",
+                enable_thinking=False,
                 unload_model=False,
                 video_fps=30.0,
                 max_video_frames=32,
