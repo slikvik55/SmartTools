@@ -121,9 +121,9 @@ Works with any checkpoint those Auto classes load — for example **Qwen3-VL** (
 
 **Transformers version:** See [`requirements.txt`](requirements.txt). Gemma 4 needs **`transformers` 5.5.0 or newer**; Qwen3-VL needs a Transformers build that registers its processor/model classes.
 
-### Smart H3 Prompt
+### Smart H3 LLM
 
-**Display name:** Smart H3 Prompt
+**Display name:** Smart H3 LLM
 
 **Category:** `slikvik/LLM`
 

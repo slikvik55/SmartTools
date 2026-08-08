@@ -30,7 +30,7 @@ def _load(name: str):
 
 
 llm = _load("SmartLLM")
-h3 = _load("SmartH3Prompt")
+h3 = _load("SmartH3LLM")
 
 
 class AudioTests(unittest.TestCase):
@@ -276,7 +276,7 @@ class PipelineTests(unittest.TestCase):
             mock.patch.object(h3, "_load_model", return_value=(object(), object())),
             mock.patch.object(h3, "_generate_text", side_effect=fake_generate),
         ):
-            prompt, analysis = h3.SmartH3Prompt().run(
+            prompt, analysis = h3.SmartH3LLM().run(
                 model_folder="model",
                 skill="base",
                 base_workflow="T2VA",
@@ -330,7 +330,7 @@ class PipelineTests(unittest.TestCase):
             mock.patch.object(h3, "_load_model", return_value=(object(), object())),
             mock.patch.object(h3, "_generate_text", side_effect=fake_generate),
         ):
-            prompt, _ = h3.SmartH3Prompt().run(
+            prompt, _ = h3.SmartH3LLM().run(
                 model_folder="model",
                 skill="base",
                 base_workflow="T2VA",

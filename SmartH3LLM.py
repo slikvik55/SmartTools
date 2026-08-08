@@ -73,7 +73,7 @@ def _read_guide(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError as e:
-        raise RuntimeError(f"SmartH3Prompt: required H3 guide is missing: {path}") from e
+        raise RuntimeError(f"SmartH3LLM: required H3 guide is missing: {path}") from e
 
 
 def _base_rules_and_example(workflow: str) -> tuple[str, str]:
@@ -99,7 +99,7 @@ def _ref_rules_and_example() -> tuple[str, str]:
 def _format_duration(duration: float) -> str:
     value = float(duration)
     if value <= 0:
-        raise ValueError("SmartH3Prompt: video_duration must be greater than zero.")
+        raise ValueError("SmartH3LLM: video_duration must be greater than zero.")
     return f"{value:.2f}"
 
 
@@ -114,7 +114,7 @@ def _active_image_tensors(
     for index in range(required):
         if images[index] is None:
             raise ValueError(
-                f"SmartH3Prompt: {workflow} requires image_{index + 1} to be connected."
+                f"SmartH3LLM: {workflow} requires image_{index + 1} to be connected."
             )
     return [image for image in images[:required] if image is not None]
 
@@ -655,7 +655,7 @@ Change only what is needed for compliance."""
     return system, user
 
 
-class SmartH3Prompt:
+class SmartH3LLM:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -790,7 +790,7 @@ class SmartH3Prompt:
     FUNCTION = "run"
     OUTPUT_NODE = False
     CATEGORY = "slikvik/LLM"
-    DISPLAY_NAME = "Smart H3 Prompt"
+    DISPLAY_NAME = "Smart H3 LLM"
     DESCRIPTION = (
         "Analyzes optional picture, video, and VHS/ComfyUI audio references with a local "
         "multimodal model, then writes and validates a MiniMax H3 prompt."
@@ -1001,7 +1001,7 @@ class SmartH3Prompt:
                 if not errors:
                     break
                 logger.warning(
-                    "SmartH3Prompt: repair pass %d/%d for %d validation issue(s).",
+                    "SmartH3LLM: repair pass %d/%d for %d validation issue(s).",
                     repair_attempt,
                     max_repair_passes,
                     len(errors),
@@ -1046,7 +1046,7 @@ class SmartH3Prompt:
                 )
             if errors:
                 raise RuntimeError(
-                    f"SmartH3Prompt: generated prompt remained invalid after "
+                    f"SmartH3LLM: generated prompt remained invalid after "
                     f"{max_repair_passes} repair passes:\n- "
                     + "\n- ".join(errors)
                 )
@@ -1056,5 +1056,5 @@ class SmartH3Prompt:
                 _free_cache_entry(cache_key)
 
 
-NODE_CLASS_MAPPINGS = {"SmartH3Prompt": SmartH3Prompt}
-NODE_DISPLAY_NAME_MAPPINGS = {"SmartH3Prompt": "Smart H3 Prompt"}
+NODE_CLASS_MAPPINGS = {"SmartH3LLM": SmartH3LLM}
+NODE_DISPLAY_NAME_MAPPINGS = {"SmartH3LLM": "Smart H3 LLM"}
