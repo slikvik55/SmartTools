@@ -1,6 +1,6 @@
 # SmartTools
 
-Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI). Category: **slikvik** / **slikvik/Image** / **slikvik/LLM**.
+Custom nodes for [ComfyUI](https://github.com/comfyanonymous/ComfyUI). Category: **slikvik** / **slikvik/Image** / **slikvik/LLM** / **slikvik/Prompt**.
 
 ## Installation
 
@@ -164,6 +164,30 @@ The audio socket accepts `{"waveform": Tensor[B,C,T], "sample_rate": int}`, the 
 **Outputs:** `h3_prompt` is a clean paste-ready H3 prompt with no analysis or markdown wrapper. `analysis` contains the model's factual notes about the connected references and can be left unconnected.
 
 Because this node normally performs two model generations (analysis and prompt writing), with up to two additional generations when repair is required, it takes longer than a single Smart LLM call. The model remains loaded between passes and follows the `unload_model` setting after completion.
+
+### Smart H3 Prompt
+
+**Display name:** Smart H3 Prompt
+
+**Category:** `slikvik/Prompt`
+
+Builds a paste-ready MiniMax H3 prompt entirely with deterministic Python logic. It does not load an LLM or inspect media. Instead, describe the future reference assets in the multiline `<Picture 1>`…`<Picture 4>`, `<Video 1>`, and `<Audio 1>` widgets.
+
+| Input | Notes |
+|--------|-------|
+| `skill` / `base_workflow` | Select base T2VA/I2VA/FL2VA/L2VA output or the six-section ref2VA format. |
+| Reference-role selectors | Assign each described picture and video its H3 role. In ref2VA, **Auto from prompt** deterministically falls back to subject/reference for pictures and reference generation for video. |
+| `Shot 1` | Required first-shot description. Do not type a `[Shot 1]` header. |
+| `Shot 2`, `Shot 3` | Optional later-shot descriptions. Shot 3 requires Shot 2. The node adds sequential H3 headers. |
+| Shot start times | Numeric seconds for Shots 2 and 3. The node formats them as `MM:SS.mmm`; populated times must increase and remain before `video_duration`. |
+| `verbatim_dialogue` | Exact dialogue/lyrics to verify. Place each line in the appropriate shot inside `<d>[Language] ...</d>`; the node cannot infer its speaker or timing. |
+| H3 section details | Optional `subject_definitions`, `summary`, `retention_analysis`, `overall_soundscape`, and `non_diegetic_music` bodies. Omit field headings. Missing content receives conservative generic defaults. |
+
+Base workflows require the prescribed picture descriptions: none for T2VA, Picture 1 for I2VA/L2VA, and Pictures 1–2 for FL2VA. Base output keeps video/audio descriptions as ordinary prose because `<Video N>`, `<Audio N>`, and `<Subject N>` labels belong only to ref2VA.
+
+ref2VA picture descriptions must be populated contiguously from Picture 1. The node creates task prefixes from the selected roles, definitions for omitted active labels, and conservative retention markers. Custom section text remains authoritative, but it must use consistent H3 labels. Generic defaults provide valid structure; for production-quality detail, explicitly fill the section fields and all shot descriptions.
+
+The output is rejected with a focused error if references are missing, cuts are invalid, dialogue tags are malformed, or the assembled result violates the bundled H3 guides. There is no LLM repair pass.
 
 ## Author
 
